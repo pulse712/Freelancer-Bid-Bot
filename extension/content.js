@@ -78,6 +78,119 @@ function setNativeValue(element, value) {
   element.dispatchEvent(new Event("change", { bubbles: true }));
 }
 
+// ----- visible, human-like mouse pointer -----
+
+const CURSOR_ID = "bidbot-cursor";
+const CURSOR_SVG =
+  '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 32" width="24" height="32">' +
+  '<path d="M3 2 L3 26 L9 20 L13 30 L17 28 L13 18 L21 18 Z" fill="#fff" stroke="#111" stroke-width="1.6" stroke-linejoin="round"/></svg>';
+
+const pointer = { element: null, x: window.innerWidth / 2, y: window.innerHeight / 2, hideTimer: null };
+
+function ensurePointer() {
+  if (pointer.element && pointer.element.isConnected) return pointer.element;
+  const element = document.createElement("div");
+  element.id = CURSOR_ID;
+  element.style.cssText =
+    "position:fixed;left:0;top:0;width:24px;height:32px;z-index:2147483647;pointer-events:none;" +
+    "filter:drop-shadow(0 1px 2px rgba(0,0,0,.6));transition:opacity .4s;opacity:1;will-change:transform;";
+  element.innerHTML = CURSOR_SVG;
+  document.documentElement.appendChild(element);
+  pointer.element = element;
+  placePointer(pointer.x, pointer.y);
+  return element;
+}
+
+function placePointer(x, y) {
+  pointer.x = x;
+  pointer.y = y;
+  if (pointer.element) pointer.element.style.transform = `translate(${x - 3}px, ${y - 2}px)`;
+}
+
+function schedulePointerHide(delayMs = 4000) {
+  clearTimeout(pointer.hideTimer);
+  pointer.hideTimer = setTimeout(() => {
+    if (pointer.element) pointer.element.style.opacity = "0";
+  }, delayMs);
+}
+
+function showPointer() {
+  const element = ensurePointer();
+  element.style.opacity = "1";
+  clearTimeout(pointer.hideTimer);
+}
+
+function mouseEventInit(x, y, extra = {}) {
+  return { bubbles: true, cancelable: true, composed: true, view: window, clientX: x, clientY: y, button: 0, ...extra };
+}
+
+function firePointerAndMouse(target, type, x, y, extra = {}) {
+  const init = mouseEventInit(x, y, extra);
+  if (typeof PointerEvent === "function" && type !== "click") {
+    target.dispatchEvent(new PointerEvent(`pointer${type.replace("mouse", "")}`, { ...init, pointerId: 1, pointerType: "mouse", isPrimary: true }));
+  }
+  target.dispatchEvent(new MouseEvent(type, init));
+}
+
+function randomPointIn(element) {
+  const rect = element.getBoundingClientRect();
+  return {
+    x: rect.left + rect.width * randomBetween(0.3, 0.7),
+    y: rect.top + rect.height * randomBetween(0.35, 0.65)
+  };
+}
+
+function easeInOut(t) {
+  return t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t;
+}
+
+async function movePointerTo(element) {
+  showPointer();
+  element.scrollIntoView({ block: "center" });
+  await wait(randomBetween(150, 350));
+
+  const from = { x: pointer.x, y: pointer.y };
+  const to = randomPointIn(element);
+  const distance = Math.hypot(to.x - from.x, to.y - from.y);
+  const duration = Math.min(1400, Math.max(350, 300 + distance * 0.9));
+  // A curved path: a control point pushed sideways from the straight line.
+  const bend = (Math.random() < 0.5 ? -1 : 1) * Math.min(160, distance * randomBetween(0.15, 0.35));
+  const control = { x: (from.x + to.x) / 2 + (-(to.y - from.y) / (distance || 1)) * bend, y: (from.y + to.y) / 2 + ((to.x - from.x) / (distance || 1)) * bend };
+
+  const start = performance.now();
+  while (true) {
+    const t = Math.min(1, (performance.now() - start) / duration);
+    const e = easeInOut(t);
+    const jitter = t < 1 ? randomBetween(-1.2, 1.2) : 0;
+    const x = (1 - e) * (1 - e) * from.x + 2 * (1 - e) * e * control.x + e * e * to.x + jitter;
+    const y = (1 - e) * (1 - e) * from.y + 2 * (1 - e) * e * control.y + e * e * to.y + jitter;
+    placePointer(x, y);
+    const under = document.elementFromPoint(x, y) || document.body;
+    firePointerAndMouse(under, "mousemove", x, y);
+    if (t >= 1) break;
+    await wait(16);
+  }
+  return to;
+}
+
+async function humanClick(element) {
+  const { x, y } = await movePointerTo(element);
+  await wait(randomBetween(90, 220));
+  const target = document.elementFromPoint(x, y) || element;
+  firePointerAndMouse(target, "mouseover", x, y);
+  firePointerAndMouse(target, "mousedown", x, y, { buttons: 1 });
+  if (pointer.element) pointer.element.style.transform += " scale(0.85)";
+  await wait(randomBetween(50, 130));
+  firePointerAndMouse(target, "mouseup", x, y);
+  placePointer(x, y);
+  firePointerAndMouse(target, "click", x, y);
+  if (target !== element && !element.contains(target)) {
+    element.click(); // the spot was covered by something else; make sure the intended element still gets the click
+  }
+  if (typeof element.focus === "function") element.focus({ preventScroll: true });
+  schedulePointerHide();
+}
+
 // Typing delay ranges in ms per character.
 const TYPING_SPEEDS = {
   fast: [15, 45],
@@ -100,8 +213,7 @@ function pauseAfter(char, [min, max]) {
 
 async function typeLikeHuman(element, text, speed) {
   const range = TYPING_SPEEDS[speed] || TYPING_SPEEDS.normal;
-  element.focus();
-  element.scrollIntoView({ block: "center" });
+  element.focus({ preventScroll: true });
   setNativeValue(element, "");
   await wait(randomBetween(300, 800));
 
@@ -199,8 +311,11 @@ async function selectUpgrade(labelPattern) {
       const box = boxes[0];
       if (checkboxState(box)) return "already selected";
 
-      const clickTargets = [box.closest("label"), box, badge];
-      for (const target of clickTargets) {
+      const visibleTarget = [box.closest("label"), badge, box].find((candidate) => candidate && isVisible(candidate));
+      await humanClick(visibleTarget || box);
+      await wait(300);
+      if (checkboxState(box)) return "selected";
+      for (const target of [box.closest("label"), box, badge]) {
         if (!target) continue;
         target.click();
         await wait(300);
@@ -220,11 +335,15 @@ async function fillBid({ draft, autoSubmit, humanTyping, typingSpeed, sealedBid 
   if (!bidInput) {
     throw new Error("Could not find bid description field.");
   }
+  await humanClick(bidInput);
   if (humanTyping) {
     await typeLikeHuman(bidInput, draft, typingSpeed);
   } else {
     setNativeValue(bidInput, draft);
   }
+  // One more click in the box after typing, so the page registers the finished text.
+  await wait(randomBetween(300, 700));
+  await humanClick(bidInput);
 
   let sealed = "skipped";
   if (sealedBid) {
@@ -243,8 +362,7 @@ async function fillBid({ draft, autoSubmit, humanTyping, typingSpeed, sealedBid 
     throw new Error("Bid typed, but the Place Bid button is disabled. Check the amount and other required fields.");
   }
   await wait(randomBetween(700, 1800));
-  submitButton.scrollIntoView({ block: "center" });
-  submitButton.click();
+  await humanClick(submitButton);
   return { submitClicked: true, submitFound: true, sealed };
 }
 
