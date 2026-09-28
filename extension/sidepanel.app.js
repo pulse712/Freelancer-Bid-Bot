@@ -225,7 +225,7 @@ async function createBidFromUrl() {
   button.disabled = true;
   try {
     await saveSettings();
-    setStatus("Opening the project, reading it, and writing the bid...");
+    setStatus("Opening the project...");
     const result = await sendToBackground("MANUAL_CREATE_BID_FROM_URL", { url });
     $("draftOutput").value = result.draft || "";
     const source = result.draftSource === "extension" ? "this panel's API key" : "the server";

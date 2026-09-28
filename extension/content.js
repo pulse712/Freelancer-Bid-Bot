@@ -1022,15 +1022,33 @@ async function waitForBidInput(timeoutMs = 15000) {
   return null;
 }
 
+function detectNda() {
+  const links = unsignedAgreementLinks();
+  const text = (document.body?.innerText || "").slice(0, 20000);
+  const banner = /you must sign/i.test(text) && /(non[-\s]?disclosure|\bnda\b|ip agreement|intellectual property)/i.test(text);
+  const kinds = [
+    ...new Set(
+      links
+        .map((link) => agreementKindOf(normalizedText(link)))
+        .filter(Boolean)
+    )
+  ];
+  if (banner && !kinds.length) kinds.push("nda");
+  return { nda: links.length > 0 || banner, kinds };
+}
+
 async function fillBid({ draft, autoSubmit, humanTyping, typingSpeed, sealedBid, signAgreements: shouldSign, signerName, signerAddress }) {
   if (!draft) {
     throw new Error("No draft text to fill.");
   }
-  const agreements = await signAgreements({
-    enabled: shouldSign !== false,
-    signerName: (signerName || "").trim(),
-    signerAddress: (signerAddress || "").trim()
-  });
+  const agreements =
+    shouldSign === false
+      ? "skipped"
+      : await signAgreements({
+          enabled: true,
+          signerName: (signerName || "").trim(),
+          signerAddress: (signerAddress || "").trim()
+        });
   if (agreements.startsWith("needed:")) {
     throw new Error(agreements);
   }
@@ -1232,11 +1250,18 @@ async function pressSubmit(button, bidInput, draft) {
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  if (!IS_TOP && (message?.type === "EXTRACT_PROJECT" || message?.type === "FILL_BID")) {
+  if (!IS_TOP && (message?.type === "EXTRACT_PROJECT" || message?.type === "FILL_BID" || message?.type === "DETECT_NDA" || message?.type === "SIGN_AGREEMENTS")) {
     return false;
   }
   const handlers = {
     EXTRACT_PROJECT: async () => ({ project: await extractWhenReady() }),
+    DETECT_NDA: async () => detectNda(),
+    SIGN_AGREEMENTS: () =>
+      signAgreements({
+        enabled: true,
+        signerName: (message.signerName || "").trim(),
+        signerAddress: (message.signerAddress || "").trim()
+      }).then((agreements) => ({ agreements })),
     FILL_BID: () => fillBid(message),
     FILL_AGREEMENT: () =>
       fillEmbeddedAgreement(message.signerName || "", message.signerAddress || "")

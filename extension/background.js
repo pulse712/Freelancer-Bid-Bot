@@ -126,13 +126,13 @@ async function sendToTab(tabId, message) {
   throw lastError;
 }
 
-async function fillBidInTab(tabId, settings, draft) {
+async function fillBidInTab(tabId, settings, draft, { skipSign = false } = {}) {
   const { ok, ...fill } = await sendToTab(tabId, {
     type: "FILL_BID",
     draft,
     autoSubmit: Boolean(settings.autoSubmit),
     sealedBid: settings.sealedBid !== false,
-    signAgreements: settings.signAgreements !== false,
+    signAgreements: skipSign ? false : settings.signAgreements !== false,
     signerName: settings.signerName || settings.workerName || "",
     signerAddress: settings.signerAddress || "",
     humanTyping: settings.humanTyping !== false,
@@ -141,11 +141,25 @@ async function fillBidInTab(tabId, settings, draft) {
   return fill;
 }
 
-async function readProject(tabId, url) {
-  try {
-    return { project: await BidBotFreelancer.fetchProject(url), projectSource: "api" };
-  } catch (error) {
-    console.warn("Freelancer API lookup failed, reading the page instead:", error.message);
+async function waitForPageAfterSign(tabId) {
+  await wait(1200);
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  if (tab && tab.status === "loading") {
+    await waitForTabComplete(tabId, 8000).catch(() => {});
+  }
+  await wait(600);
+}
+
+async function readProject(tabId, url, { preferPage = false } = {}) {
+  if (!preferPage) {
+    try {
+      const project = await BidBotFreelancer.fetchProject(url);
+      if ((project.description || "").length > 80) {
+        return { project, projectSource: "api" };
+      }
+    } catch (error) {
+      console.warn("Freelancer API lookup failed, reading the page instead:", error.message);
+    }
   }
   const { project } = await sendToTab(tabId, { type: "EXTRACT_PROJECT" });
   return { project, projectSource: "page" };
@@ -166,15 +180,43 @@ async function writeDraft(settings, project) {
 }
 
 async function createBidInTab(tabId, settings, serverDraft, url) {
-  if (serverDraft) {
-    const fill = await fillBidInTab(tabId, settings, serverDraft);
-    return { draft: serverDraft, draftSource: "server", ...fill };
+  const signerName = settings.signerName || settings.workerName || "";
+  const signerAddress = settings.signerAddress || "";
+  const detect = await sendToTab(tabId, { type: "DETECT_NDA" });
+  let agreements = "none required";
+
+  if (detect.nda) {
+    if (settings.signAgreements === false) {
+      throw new Error("This project requires an NDA/IP signature. Turn on auto-sign and fill Full legal name.");
+    }
+    if (!signerName.trim()) {
+      throw new Error("This is an NDA/IP project. Fill Full legal name in the side panel first.");
+    }
+    const signed = await sendToTab(tabId, {
+      type: "SIGN_AGREEMENTS",
+      signerName,
+      signerAddress
+    });
+    agreements = signed.agreements || "signed";
+    await waitForPageAfterSign(tabId);
   }
 
-  const { project, projectSource } = await readProject(tabId, url);
-  const { draft, draftSource } = await writeDraft(settings, project);
-  const fill = await fillBidInTab(tabId, settings, draft);
-  return { project, projectSource, draft, draftSource, ...fill };
+  let project = null;
+  let projectSource = "";
+  let draft = serverDraft || "";
+  let draftSource = serverDraft ? "server" : "";
+
+  if (!serverDraft || detect.nda) {
+    const read = await readProject(tabId, url, { preferPage: Boolean(detect.nda) });
+    project = read.project;
+    projectSource = read.projectSource;
+    const written = await writeDraft(settings, project);
+    draft = written.draft;
+    draftSource = written.draftSource;
+  }
+
+  const fill = await fillBidInTab(tabId, settings, draft, { skipSign: true });
+  return { project, projectSource, draft, draftSource, ...fill, agreements };
 }
 
 async function reportTaskResult(settings, payload) {
