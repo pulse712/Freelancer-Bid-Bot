@@ -273,25 +273,48 @@ function isDisabled(element) {
 // Text patterns for the button that sends the bid, most specific first.
 const SUBMIT_TEXT = [/^place (a )?bid$/, /^submit (bid|proposal)$/, /^place bid/, /^submit$/, /^bid now$/];
 
-function findSubmitButton() {
+function describeElement(element) {
+  if (!element) return "none";
+  const id = element.id ? `#${element.id}` : "";
+  const classes = element.className && typeof element.className === "string" ? `.${element.className.trim().split(/\s+/).slice(0, 2).join(".")}` : "";
+  return `${element.tagName.toLowerCase()}${id}${classes} "${normalizedText(element).slice(0, 30)}"`;
+}
+
+// Picks the element that sends the bid. Pages can contain several "Place Bid" texts (for example a link near the
+// top that only scrolls to the form), so candidates are scored: real buttons in the bid form, after the bid box, win.
+function findSubmitButton(bidInput) {
   const explicit = document.querySelector(SUBMIT_SELECTORS[0]);
   if (explicit && isVisible(explicit)) return explicit;
 
+  const form = bidInput ? bidInput.closest("form") : null;
   const candidates = [...document.querySelectorAll("button, [role='button'], input[type='submit'], a")].filter(
     (element) => isVisible(element) && normalizedText(element).length < 40
   );
-  for (const pattern of SUBMIT_TEXT) {
-    const match = candidates.find((element) => pattern.test(normalizedText(element) || element.value?.toLowerCase() || ""));
-    if (match) return match;
+  let best = null;
+  let bestScore = -Infinity;
+  for (const element of candidates) {
+    const text = normalizedText(element) || element.value?.toLowerCase() || "";
+    const patternIndex = SUBMIT_TEXT.findIndex((pattern) => pattern.test(text));
+    if (patternIndex === -1) continue;
+    let score = (SUBMIT_TEXT.length - patternIndex) * 10;
+    if (element.matches("button, input[type='submit']")) score += 8;
+    if (element.tagName === "A") score -= 8;
+    if (form && form.contains(element)) score += 12;
+    if (bidInput && bidInput.compareDocumentPosition(element) & Node.DOCUMENT_POSITION_FOLLOWING) score += 6;
+    if (!isDisabled(element)) score += 2;
+    if (score > bestScore) {
+      best = element;
+      bestScore = score;
+    }
   }
-  return null;
+  return best;
 }
 
-async function waitForSubmitButton(timeoutMs = 10000) {
+async function waitForSubmitButton(bidInput, timeoutMs = 10000) {
   const start = Date.now();
   let button = null;
   while (Date.now() - start < timeoutMs) {
-    button = findSubmitButton();
+    button = findSubmitButton(bidInput);
     if (button && !isDisabled(button)) return button;
     await wait(400);
   }
@@ -361,9 +384,9 @@ async function fillBid({ draft, autoSubmit, humanTyping, typingSpeed, sealedBid 
     sealed = await selectUpgrade(/^sealed$/);
   }
 
-  const submitButton = await waitForSubmitButton(autoSubmit ? 10000 : 2000);
+  const submitButton = await waitForSubmitButton(bidInput, autoSubmit ? 10000 : 2000);
   if (!autoSubmit) {
-    return { submitClicked: false, submitFound: Boolean(submitButton), sealed, registered };
+    return { submitClicked: false, submitFound: Boolean(submitButton), submitTarget: describeElement(submitButton), sealed, registered };
   }
   if (!submitButton) {
     throw new Error("Bid typed, but the Place Bid button was not found on the page.");
@@ -376,48 +399,57 @@ async function fillBid({ draft, autoSubmit, humanTyping, typingSpeed, sealedBid 
   return { submitClicked: true, submitFound: true, sealed, registered, ...submit };
 }
 
-// ----- trusted keyboard input (through the background worker and Chrome's debugger) -----
+// ----- making the page's form notice the typed text -----
 
-async function trustedInput(actions) {
-  const response = await chrome.runtime.sendMessage({ type: "TRUSTED_INPUT", actions }).catch((error) => ({ ok: false, error: error.message }));
-  if (!response?.ok) throw new Error(response?.error || "trusted input unavailable");
+function currentText(element) {
+  return element.isContentEditable ? element.textContent : element.value;
 }
 
-// After script typing, the page's form may not have noticed the text. A real Enter + Backspace makes it
-// re-read the box and leaves the text unchanged. Falls back to synthetic key events if the debugger is unavailable.
+function fireKey(element, key, keyCode) {
+  for (const type of ["keydown", "keypress", "keyup"]) {
+    element.dispatchEvent(new KeyboardEvent(type, { key, code: key, keyCode, which: keyCode, bubbles: true, cancelable: true }));
+  }
+}
+
+// After typing, press Enter and Backspace (as events) so frameworks watching the box re-read its value,
+// then fire input/change/blur. The text ends exactly as typed.
 async function confirmTypedText(element) {
-  const expected = element.isContentEditable ? element.textContent : element.value;
+  const expected = currentText(element);
   element.focus({ preventScroll: true });
   if (!element.isContentEditable) element.setSelectionRange(expected.length, expected.length);
-  try {
-    await trustedInput([{ key: "Enter" }, { key: "Backspace" }]);
-    const now = element.isContentEditable ? element.textContent : element.value;
-    if (now !== expected) setNativeValue(element, expected); // safety: never leave the text altered
-    return "trusted keys";
-  } catch (error) {
-    for (const type of ["keydown", "keyup"]) {
-      element.dispatchEvent(new KeyboardEvent(type, { key: "Enter", code: "Enter", keyCode: 13, bubbles: true, cancelable: true }));
-    }
-    element.dispatchEvent(new Event("input", { bubbles: true }));
-    element.dispatchEvent(new Event("change", { bubbles: true }));
-    element.dispatchEvent(new FocusEvent("blur", { bubbles: true }));
-    return `synthetic keys (${error.message})`;
+
+  fireKey(element, "Enter", 13);
+  if (!element.isContentEditable) {
+    nativeValueSetter(element).call(element, `${expected}\n`);
+    element.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertLineBreak", data: null }));
   }
+  await wait(randomBetween(120, 260));
+  fireKey(element, "Backspace", 8);
+  if (!element.isContentEditable) {
+    nativeValueSetter(element).call(element, expected);
+    element.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "deleteContentBackward", data: null }));
+  }
+  await wait(randomBetween(80, 160));
+  if (currentText(element) !== expected) setNativeValue(element, expected);
+  element.dispatchEvent(new Event("change", { bubbles: true }));
+  element.dispatchEvent(new FocusEvent("blur", { bubbles: true }));
+  element.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+  return "enter+backspace";
 }
 
-// Replace the whole proposal text with a single trusted insert, so the form definitely receives it.
-async function retypeTrusted(element, text) {
+// Re-enter the proposal in one go (paste-like), for a retry after the form said the box was empty.
+async function retypeText(element, text) {
   element.focus({ preventScroll: true });
+  setNativeValue(element, "");
+  await wait(randomBetween(150, 300));
   if (element.isContentEditable) {
-    const range = document.createRange();
-    range.selectNodeContents(element);
-    const selection = getSelection();
-    selection.removeAllRanges();
-    selection.addRange(range);
+    element.textContent = text;
+    element.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertFromPaste", data: text }));
   } else {
-    element.select();
+    nativeValueSetter(element).call(element, text);
+    element.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertFromPaste", data: text }));
   }
-  await trustedInput([{ text }]);
+  await confirmTypedText(element);
 }
 
 // ----- submit -----
@@ -454,57 +486,77 @@ async function waitForSubmitSignal(button, before, timeoutMs) {
 }
 
 async function clickSubmitOnce(button, before) {
-  // 1. Pointer-driven click with normal mouse events.
+  // 1. Pointer-driven click: the full mouse event sequence on the element under the pointer, and on the button itself.
   const point = await movePointerTo(button);
   await wait(randomBetween(90, 220));
-  const under = document.elementFromPoint(point.x, point.y) || button;
-  firePointerAndMouse(under, "mouseover", point.x, point.y);
-  firePointerAndMouse(under, "mousedown", point.x, point.y, { buttons: 1 });
+  const under = document.elementFromPoint(point.x, point.y);
+  const target = under && button.contains(under) ? under : button;
+  firePointerAndMouse(target, "mouseover", point.x, point.y);
+  firePointerAndMouse(target, "mousemove", point.x, point.y);
+  firePointerAndMouse(target, "mousedown", point.x, point.y, { buttons: 1 });
+  button.focus({ preventScroll: true });
   await wait(randomBetween(50, 130));
-  firePointerAndMouse(under, "mouseup", point.x, point.y);
-  firePointerAndMouse(under, "click", point.x, point.y);
+  firePointerAndMouse(target, "mouseup", point.x, point.y);
+  firePointerAndMouse(target, "click", point.x, point.y);
   let signal = await waitForSubmitSignal(button, before, 2500);
   if (signal) return { submitMethod: "mouse events", signal };
 
-  // 2. The element's own click(), in case the page ignores synthetic mouse events.
+  // 2. The element's own click(), and the click on the parent component (custom button wrappers).
   button.click();
-  signal = await waitForSubmitSignal(button, before, 2000);
+  signal = await waitForSubmitSignal(button, before, 1500);
   if (signal) return { submitMethod: "element.click", signal };
-
-  // 3. A real (trusted) click from the browser at the pointer position.
-  const rect = button.getBoundingClientRect();
-  const x = rect.left + rect.width / 2;
-  const y = rect.top + rect.height / 2;
-  placePointer(x, y);
-  const response = await chrome.runtime.sendMessage({ type: "TRUSTED_CLICK", x, y }).catch((error) => ({ ok: false, error: error.message }));
-  if (!response?.ok) {
-    return { submitMethod: "mouse events", signal: null, note: `Trusted click unavailable: ${response?.error || "no response"}` };
+  const wrapper = button.parentElement;
+  if (wrapper && wrapper.tagName.includes("-")) {
+    firePointerAndMouse(wrapper, "click", point.x, point.y);
+    signal = await waitForSubmitSignal(button, before, 1500);
+    if (signal) return { submitMethod: "wrapper click", signal };
   }
-  signal = await waitForSubmitSignal(button, before, 4000);
-  return { submitMethod: "trusted click", signal };
+
+  // 3. Submit the surrounding form the way a submit button would.
+  const form = button.form || button.closest("form");
+  if (form) {
+    if (typeof form.requestSubmit === "function") {
+      try {
+        form.requestSubmit(button.matches("button, input[type='submit']") && button.form === form ? button : undefined);
+      } catch (_error) {
+        form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      }
+    } else {
+      form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    }
+    signal = await waitForSubmitSignal(button, before, 2500);
+    if (signal) return { submitMethod: "form submit", signal };
+  }
+
+  // 4. Keyboard activation.
+  button.focus({ preventScroll: true });
+  fireKey(button, "Enter", 13);
+  fireKey(button, " ", 32);
+  signal = await waitForSubmitSignal(button, before, 1500);
+  return { submitMethod: signal ? "keyboard" : "all methods tried", signal };
 }
 
 async function pressSubmit(button, bidInput, draft) {
   const before = pageText();
   let attempt = await clickSubmitOnce(button, before);
 
-  // The page rejected the form (typically "please enter your proposal"): enter the text as trusted input and retry once.
+  // The page rejected the form (typically "please enter your proposal"): re-enter the text and retry once.
   if (attempt.signal && attempt.signal.startsWith("error:") && bidInput.isConnected) {
-    let retyped = "retyped with trusted input";
-    try {
-      await retypeTrusted(bidInput, draft);
-    } catch (error) {
-      retyped = `could not retype (${error.message})`;
-    }
+    await retypeText(bidInput, draft);
     await wait(randomBetween(600, 1200));
-    const retryButton = findSubmitButton() || button;
+    const retryButton = findSubmitButton(bidInput) || button;
     const second = await clickSubmitOnce(retryButton, pageText());
-    attempt = { ...second, note: [attempt.signal, retyped, second.note].filter(Boolean).join("; ") };
+    attempt = { ...second, note: [attempt.signal, "text re-entered", second.note].filter(Boolean).join("; ") };
   }
 
   schedulePointerHide();
   const ok = attempt.signal && !attempt.signal.startsWith("error:");
-  return { submitMethod: attempt.submitMethod, submitConfirmed: ok ? attempt.signal : null, submitNote: attempt.note || (attempt.signal || undefined) };
+  return {
+    submitMethod: attempt.submitMethod,
+    submitConfirmed: ok ? attempt.signal : null,
+    submitTarget: describeElement(button),
+    submitNote: attempt.note || (attempt.signal || undefined)
+  };
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {

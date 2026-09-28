@@ -229,15 +229,15 @@ async function createBidFromUrl() {
     const source = result.draftSource === "extension" ? "this panel's API key" : "the server";
     const notes = [];
     if (result.sealed && result.sealed !== "skipped") notes.push(`Sealed: ${result.sealed}`);
-    if (result.registered && result.registered !== "trusted keys") notes.push(`Text confirmed with ${result.registered}`);
-    if (!result.submitClicked) notes.push(result.submitFound ? "Place Bid button found" : "Place Bid button NOT found");
-    if (result.submitClicked) {
+    if (!result.submitClicked) {
+      notes.push(result.submitFound ? `Place Bid button found: ${result.submitTarget}` : "Place Bid button NOT found");
+    } else {
       notes.push(
         result.submitConfirmed
-          ? `Place Bid clicked via ${result.submitMethod}, page reacted: ${result.submitConfirmed}`
-          : `Place Bid clicked via ${result.submitMethod}, but the page did not visibly change - check it`
+          ? `clicked ${result.submitTarget} via ${result.submitMethod}, page reacted: ${result.submitConfirmed}`
+          : `clicked ${result.submitTarget} via ${result.submitMethod}, but the page did not visibly change - check it`
       );
-      if (result.submitNote) notes.push(result.submitNote);
+      if (result.submitNote && result.submitNote !== result.submitConfirmed) notes.push(result.submitNote);
     }
     const suffix = notes.length ? ` (${notes.join("; ")})` : "";
     const good = result.submitClicked ? Boolean(result.submitConfirmed) : result.submitFound;
