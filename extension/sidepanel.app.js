@@ -143,9 +143,9 @@ async function loadSettings() {
   for (const [key, id] of Object.entries(CHECKBOXES)) {
     if (stored[key] !== undefined) $(id).checked = Boolean(stored[key]);
   }
-  const speedMap = { fast: "8", normal: "15", slow: "25" };
+  const speedMap = { fast: "3", normal: "10", slow: "10", "8": "3", "15": "10", "25": "10" };
   const speed = speedMap[stored.typingSpeed] || stored.typingSpeed;
-  $("typingSpeed").value = [...$("typingSpeed").options].some((option) => option.value === speed) ? speed : "8";
+  $("typingSpeed").value = [...$("typingSpeed").options].some((option) => option.value === speed) ? speed : "3";
   if (!$("bidPrompt").value) $("bidPrompt").value = BidBotAI.DEFAULT_PROMPT;
   $("placeholderHint").textContent =
     "Placeholders filled from the project: " + BidBotAI.PLACEHOLDERS.map((name) => `{${name}}`).join(" ");

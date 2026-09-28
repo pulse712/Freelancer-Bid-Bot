@@ -192,8 +192,8 @@ async function humanClick(element) {
 }
 
 // Total typing time for the whole bid, in seconds. Older saved values are mapped to the new ones.
-const TYPING_SECONDS = { 8: 8, 15: 15, 25: 25, fast: 8, normal: 15, slow: 25 };
-const DEFAULT_TYPING_SECONDS = 8;
+const TYPING_SECONDS = { 3: 3, 10: 10, 8: 3, 15: 10, 25: 10, fast: 3, normal: 10, slow: 10 };
+const DEFAULT_TYPING_SECONDS = 3;
 
 function randomBetween(min, max) {
   return min + Math.random() * (max - min);

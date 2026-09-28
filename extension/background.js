@@ -130,7 +130,7 @@ async function fillBidInTab(tabId, settings, draft) {
     autoSubmit: Boolean(settings.autoSubmit),
     sealedBid: settings.sealedBid !== false,
     humanTyping: settings.humanTyping !== false,
-    typingSpeed: settings.typingSpeed || "8"
+    typingSpeed: settings.typingSpeed || "3"
   });
   return fill;
 }
