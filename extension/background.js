@@ -124,7 +124,7 @@ async function sendToTab(tabId, message) {
 }
 
 async function fillBidInTab(tabId, settings, draft) {
-  const { submitClicked, submitFound, sealed } = await sendToTab(tabId, {
+  const { ok, ...fill } = await sendToTab(tabId, {
     type: "FILL_BID",
     draft,
     autoSubmit: Boolean(settings.autoSubmit),
@@ -132,7 +132,7 @@ async function fillBidInTab(tabId, settings, draft) {
     humanTyping: settings.humanTyping !== false,
     typingSpeed: settings.typingSpeed || "normal"
   });
-  return { submitClicked, submitFound, sealed };
+  return fill;
 }
 
 async function readProject(tabId, url) {
@@ -171,6 +171,24 @@ async function createBidInTab(tabId, settings, serverDraft, url) {
   return { project, projectSource, draft, draftSource, ...fill };
 }
 
+// Sends a real mouse click through Chrome's debugger interface. The page sees a trusted click,
+// exactly as if the user pressed the mouse at that spot. Coordinates are CSS pixels in the viewport.
+async function trustedClick(tabId, x, y) {
+  const target = { tabId };
+  await chrome.debugger.attach(target, "1.3");
+  try {
+    const base = { x: Math.round(x), y: Math.round(y), button: "left", clickCount: 1 };
+    await chrome.debugger.sendCommand(target, "Input.dispatchMouseEvent", { ...base, type: "mouseMoved" });
+    await wait(60 + Math.random() * 80);
+    await chrome.debugger.sendCommand(target, "Input.dispatchMouseEvent", { ...base, type: "mousePressed", buttons: 1 });
+    await wait(50 + Math.random() * 90);
+    await chrome.debugger.sendCommand(target, "Input.dispatchMouseEvent", { ...base, type: "mouseReleased", buttons: 0 });
+  } finally {
+    await chrome.debugger.detach(target).catch(() => {});
+  }
+  return {};
+}
+
 async function reportTaskResult(settings, payload) {
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
@@ -204,6 +222,8 @@ async function processTask(settings, task) {
         pageUrl: task.url,
         submitClicked: result.submitClicked,
         submitFound: result.submitFound,
+        submitMethod: result.submitMethod,
+        submitConfirmed: result.submitConfirmed,
         sealed: result.sealed,
         draftSource: result.draftSource,
         workerName: settings.workerName || ""
@@ -302,6 +322,15 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === "TYPING_PROGRESS") {
     sendResponse({ ok: true });
     return false;
+  }
+
+  if (message?.type === "TRUSTED_CLICK") {
+    const tabId = _sender?.tab?.id;
+    if (!tabId) {
+      sendResponse({ ok: false, error: "No tab for trusted click" });
+      return false;
+    }
+    return respondWith(trustedClick(tabId, message.x, message.y), sendResponse);
   }
 
   if (message?.type === "MANUAL_OPEN_URL") {

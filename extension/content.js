@@ -362,8 +362,69 @@ async function fillBid({ draft, autoSubmit, humanTyping, typingSpeed, sealedBid 
     throw new Error("Bid typed, but the Place Bid button is disabled. Check the amount and other required fields.");
   }
   await wait(randomBetween(700, 1800));
-  await humanClick(submitButton);
-  return { submitClicked: true, submitFound: true, sealed };
+  const submit = await pressSubmit(submitButton);
+  return { submitClicked: true, submitFound: true, sealed, ...submit };
+}
+
+// Signs that the bid was sent: the form is gone, the button is gone or busy, or a confirmation text appeared.
+function bidSubmittedSignal(button) {
+  if (!button.isConnected || !isVisible(button)) return "button gone";
+  if (isDisabled(button)) return "button disabled";
+  if (button.querySelector("[class*='spinner'], [class*='loading']")) return "button busy";
+  if (!document.querySelector(BID_INPUT_SELECTORS.join(","))) return "bid form gone";
+  const text = (document.body.innerText || "").slice(0, 20000);
+  if (/\b(bid|proposal) (has been |was )?(placed|submitted|sent)\b|you('ve| have) (already )?(bid|placed a bid)|edit (your )?bid|retract bid/i.test(text)) {
+    return "confirmation text";
+  }
+  return null;
+}
+
+async function waitForSubmitSignal(button, timeoutMs) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const signal = bidSubmittedSignal(button);
+    if (signal) return signal;
+    await wait(250);
+  }
+  return null;
+}
+
+async function pressSubmit(button) {
+  // 1. Pointer-driven click with normal mouse events.
+  const point = await movePointerTo(button);
+  await wait(randomBetween(90, 220));
+  const under = document.elementFromPoint(point.x, point.y) || button;
+  firePointerAndMouse(under, "mouseover", point.x, point.y);
+  firePointerAndMouse(under, "mousedown", point.x, point.y, { buttons: 1 });
+  await wait(randomBetween(50, 130));
+  firePointerAndMouse(under, "mouseup", point.x, point.y);
+  firePointerAndMouse(under, "click", point.x, point.y);
+  let signal = await waitForSubmitSignal(button, 2500);
+  if (signal) return { submitMethod: "mouse events", submitConfirmed: signal };
+
+  // 2. The element's own click() and a keyboard press, in case the page ignores synthetic mouse events.
+  button.click();
+  signal = await waitForSubmitSignal(button, 2000);
+  if (signal) return { submitMethod: "element.click", submitConfirmed: signal };
+  button.focus({ preventScroll: true });
+  for (const type of ["keydown", "keypress", "keyup"]) {
+    button.dispatchEvent(new KeyboardEvent(type, { key: "Enter", code: "Enter", keyCode: 13, bubbles: true, cancelable: true }));
+  }
+  signal = await waitForSubmitSignal(button, 1500);
+  if (signal) return { submitMethod: "keyboard", submitConfirmed: signal };
+
+  // 3. A real (trusted) click from the browser, sent by the background worker at the pointer position.
+  const rect = button.getBoundingClientRect();
+  const x = rect.left + rect.width / 2;
+  const y = rect.top + rect.height / 2;
+  placePointer(x, y);
+  const response = await chrome.runtime.sendMessage({ type: "TRUSTED_CLICK", x, y }).catch((error) => ({ ok: false, error: error.message }));
+  if (!response?.ok) {
+    return { submitMethod: "mouse events", submitConfirmed: null, submitNote: `Trusted click unavailable: ${response?.error || "no response"}` };
+  }
+  signal = await waitForSubmitSignal(button, 4000);
+  schedulePointerHide();
+  return { submitMethod: "trusted click", submitConfirmed: signal };
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {

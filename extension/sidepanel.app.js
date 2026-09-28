@@ -227,10 +227,19 @@ async function createBidFromUrl() {
     const notes = [];
     if (result.sealed && result.sealed !== "skipped") notes.push(`Sealed: ${result.sealed}`);
     if (!result.submitClicked) notes.push(result.submitFound ? "Place Bid button found" : "Place Bid button NOT found");
+    if (result.submitClicked) {
+      notes.push(
+        result.submitConfirmed
+          ? `Place Bid clicked via ${result.submitMethod}, page reacted: ${result.submitConfirmed}`
+          : `Place Bid clicked via ${result.submitMethod}, but the page did not visibly change - check it`
+      );
+      if (result.submitNote) notes.push(result.submitNote);
+    }
     const suffix = notes.length ? ` (${notes.join("; ")})` : "";
+    const good = result.submitClicked ? Boolean(result.submitConfirmed) : result.submitFound;
     setStatus(
       (result.submitClicked ? `Bid typed and submitted, written by ${source}.` : `Bid typed, not submitted, written by ${source}.`) + suffix,
-      result.submitClicked || result.submitFound ? "ok" : "error"
+      good ? "ok" : "error"
     );
   } catch (error) {
     setStatus(`Bid failed: ${error.message}`, "error");
