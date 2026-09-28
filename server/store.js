@@ -141,6 +141,7 @@ async function finishTask(task, status, details) {
     taskId: task.id,
     workerId: task.workerId,
     url: task.url,
+    title: task.project?.title || "",
     status,
     details: details || null,
     at: task.finishedAt

@@ -23,12 +23,63 @@ module.exports = `<!doctype html>
     .status-failed { color: #ff6b6b; }
     .status-dispatched { color: #ffc857; }
     .message { font-size: 12px; color: #c7c9d9; }
+    header { display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #2c2f44; margin-bottom: 8px; }
+    nav button { margin: 0 0 -1px 6px; border-radius: 6px 6px 0 0; background: transparent; color: #c7c9d9; border-bottom: 2px solid transparent; }
+    nav button.active { color: #fff; border-bottom-color: #4b7bff; }
+    .tab { display: none; }
+    .tab.active { display: block; }
+    .stats { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin-top: 12px; }
+    .stat { background: #171a27; border: 1px solid #2c2f44; border-radius: 8px; padding: 10px 12px; }
+    .stat .value { font-size: 22px; font-weight: bold; }
+    .stat .label { font-size: 11px; color: #8a8ea8; margin-top: 2px; }
+    .outcome-submitted { color: #5fd37a; }
+    .outcome-filled { color: #8fb0ff; }
+    .outcome-failed { color: #ff6b6b; }
   </style>
 </head>
 <body>
-  <h1>Bid Bot Dashboard</h1>
+  <header>
+    <h1>Bid Bot</h1>
+    <nav>
+      <button type="button" data-tab="dashboard">Dashboard</button>
+      <button type="button" data-tab="settings">Settings</button>
+    </nav>
+  </header>
 
-  <h2>Settings</h2>
+  <section id="tab-dashboard" class="tab">
+  <div class="stats" id="stats"></div>
+  <div class="hint">Counts cover the last 100 tasks. Refreshes every 10 seconds.</div>
+
+  <h2>Queue projects</h2>
+  <label for="workerId">Worker ID</label>
+  <input id="workerId" list="workerList" placeholder="acc-1" />
+  <datalist id="workerList"></datalist>
+  <label for="urls">Freelancer project URLs (one per line)</label>
+  <textarea id="urls" rows="4" placeholder="https://www.freelancer.com/projects/..."></textarea>
+  <button id="queueBtn" type="button">Create bids and queue</button>
+  <p class="message" id="queueMessage"></p>
+
+  <h2>Working results</h2>
+  <table>
+    <thead><tr><th>Time</th><th>Worker</th><th>Project</th><th>Outcome</th><th>Details</th></tr></thead>
+    <tbody id="resultsBody"></tbody>
+  </table>
+
+  <h2>Workers</h2>
+  <table>
+    <thead><tr><th>Worker</th><th>Status</th><th>Last seen</th></tr></thead>
+    <tbody id="workersBody"></tbody>
+  </table>
+
+  <h2>Tasks</h2>
+  <table>
+    <thead><tr><th>Created</th><th>Worker</th><th>Project</th><th>Bid</th><th>Status</th><th>Attempts</th><th>Result</th><th></th></tr></thead>
+    <tbody id="tasksBody"></tbody>
+  </table>
+  </section>
+
+  <section id="tab-settings" class="tab">
+  <h2>AI settings</h2>
   <div class="grid">
     <div>
       <label for="provider">AI provider</label>
@@ -60,27 +111,7 @@ module.exports = `<!doctype html>
   <button id="saveSettingsBtn" type="button">Save settings</button>
   <button id="clearKeyBtn" type="button" class="secondary">Remove API key</button>
   <p class="message" id="settingsMessage"></p>
-
-  <h2>Queue projects</h2>
-  <label for="workerId">Worker ID</label>
-  <input id="workerId" list="workerList" placeholder="acc-1" />
-  <datalist id="workerList"></datalist>
-  <label for="urls">Freelancer project URLs (one per line)</label>
-  <textarea id="urls" rows="4" placeholder="https://www.freelancer.com/projects/..."></textarea>
-  <button id="queueBtn" type="button">Create bids and queue</button>
-  <p class="message" id="queueMessage"></p>
-
-  <h2>Workers</h2>
-  <table>
-    <thead><tr><th>Worker</th><th>Status</th><th>Last seen</th></tr></thead>
-    <tbody id="workersBody"></tbody>
-  </table>
-
-  <h2>Recent tasks</h2>
-  <table>
-    <thead><tr><th>Created</th><th>Worker</th><th>Project</th><th>Bid</th><th>Status</th><th>Attempts</th><th>Result</th><th></th></tr></thead>
-    <tbody id="tasksBody"></tbody>
-  </table>
+  </section>
 
   <script>
     const $ = (id) => document.getElementById(id);
@@ -176,16 +207,81 @@ module.exports = `<!doctype html>
       }
     }
 
-    function renderProjectCell(row, task) {
+    function renderProjectCell(row, title, url) {
       const td = cell(row, "", "project");
-      const title = document.createElement("div");
-      title.textContent = (task.project && task.project.title) || "(title unknown)";
+      const titleEl = document.createElement("div");
+      titleEl.textContent = title || "(title unknown)";
       const link = document.createElement("a");
-      link.href = task.url;
+      link.href = url;
       link.target = "_blank";
       link.rel = "noopener";
-      link.textContent = task.url;
-      td.append(title, link);
+      link.textContent = url;
+      td.append(titleEl, link);
+    }
+
+    function outcomeOf(status, details) {
+      if (status !== "success") return { text: "Failed", className: "outcome-failed" };
+      if (details && details.submitClicked) return { text: "Submitted", className: "outcome-submitted" };
+      return { text: "Filled, not submitted", className: "outcome-filled" };
+    }
+
+    function renderStats(tasks) {
+      const counts = { queued: 0, dispatched: 0, submitted: 0, filled: 0, failed: 0 };
+      for (const task of tasks) {
+        if (task.status === "done") {
+          counts[task.result && task.result.submitClicked ? "submitted" : "filled"] += 1;
+        } else if (counts[task.status] !== undefined) {
+          counts[task.status] += 1;
+        }
+      }
+      const cards = [
+        ["Queued", counts.queued],
+        ["In progress", counts.dispatched],
+        ["Submitted", counts.submitted, "outcome-submitted"],
+        ["Filled, not submitted", counts.filled, "outcome-filled"],
+        ["Failed", counts.failed, "outcome-failed"]
+      ];
+      $("stats").replaceChildren(
+        ...cards.map(([label, value, className]) => {
+          const card = document.createElement("div");
+          card.className = "stat";
+          const valueEl = document.createElement("div");
+          valueEl.className = "value " + (className || "");
+          valueEl.textContent = value;
+          const labelEl = document.createElement("div");
+          labelEl.className = "label";
+          labelEl.textContent = label;
+          card.append(valueEl, labelEl);
+          return card;
+        })
+      );
+    }
+
+    function renderResults(results) {
+      $("resultsBody").replaceChildren();
+      if (!results.length) {
+        const row = document.createElement("tr");
+        cell(row, "No results yet. They appear here as workers finish tasks.").colSpan = 5;
+        $("resultsBody").appendChild(row);
+        return;
+      }
+      for (const result of results.slice(0, 50)) {
+        const row = document.createElement("tr");
+        const outcome = outcomeOf(result.status, result.details);
+        cell(row, formatTime(result.at));
+        cell(row, result.workerId);
+        renderProjectCell(row, result.title, result.url);
+        cell(row, outcome.text, outcome.className);
+        cell(row, (result.details && result.details.error) || "");
+        $("resultsBody").appendChild(row);
+      }
+    }
+
+    function showTab(name) {
+      const tab = name === "settings" ? "settings" : "dashboard";
+      document.querySelectorAll(".tab").forEach((el) => el.classList.toggle("active", el.id === "tab-" + tab));
+      document.querySelectorAll("nav button").forEach((el) => el.classList.toggle("active", el.dataset.tab === tab));
+      if (location.hash.slice(1) !== tab) history.replaceState(null, "", "#" + tab);
     }
 
     function renderBidCell(row, task) {
@@ -206,7 +302,7 @@ module.exports = `<!doctype html>
         const row = document.createElement("tr");
         cell(row, formatTime(task.createdAt));
         cell(row, task.workerId);
-        renderProjectCell(row, task);
+        renderProjectCell(row, task.project && task.project.title, task.url);
         renderBidCell(row, task);
         cell(row, task.status, "status-" + task.status);
         cell(row, task.attempts || 0);
@@ -229,8 +325,14 @@ module.exports = `<!doctype html>
 
     async function refresh() {
       try {
-        const [workers, tasks] = await Promise.all([api("/api/workers"), api("/api/tasks")]);
+        const [workers, tasks, results] = await Promise.all([
+          api("/api/workers"),
+          api("/api/tasks"),
+          api("/api/results")
+        ]);
         renderWorkers(workers.workers);
+        renderStats(tasks.tasks);
+        renderResults(results.results);
         renderTasks(tasks.tasks);
       } catch (error) {
         $("queueMessage").textContent = "Refresh failed: " + error.message;
@@ -262,6 +364,12 @@ module.exports = `<!doctype html>
       }
     });
 
+    document.querySelectorAll("nav button").forEach((button) => {
+      button.addEventListener("click", () => showTab(button.dataset.tab));
+    });
+    window.addEventListener("hashchange", () => showTab(location.hash.slice(1)));
+
+    showTab(location.hash.slice(1));
     loadSettings();
     refresh();
     setInterval(refresh, 10000);
