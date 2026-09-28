@@ -15,7 +15,7 @@ const TEXT_FIELDS = {
   bidPrompt: "bidPrompt",
   typingSpeed: "typingSpeed"
 };
-const CHECKBOXES = { autoSubmit: "autoSubmit", humanTyping: "humanTyping" };
+const CHECKBOXES = { autoSubmit: "autoSubmit", sealedBid: "sealedBid", humanTyping: "humanTyping" };
 
 let loadedModels = [];
 let modelsRequestId = 0;
@@ -224,9 +224,13 @@ async function createBidFromUrl() {
     const result = await sendToBackground("MANUAL_CREATE_BID_FROM_URL", { url });
     $("draftOutput").value = result.draft || "";
     const source = result.draftSource === "extension" ? "this panel's API key" : "the server";
+    const notes = [];
+    if (result.sealed && result.sealed !== "skipped") notes.push(`Sealed: ${result.sealed}`);
+    if (!result.submitClicked) notes.push(result.submitFound ? "Place Bid button found" : "Place Bid button NOT found");
+    const suffix = notes.length ? ` (${notes.join("; ")})` : "";
     setStatus(
-      result.submitClicked ? `Bid typed and submitted (written by ${source}).` : `Bid typed, not submitted (written by ${source}).`,
-      "ok"
+      (result.submitClicked ? `Bid typed and submitted, written by ${source}.` : `Bid typed, not submitted, written by ${source}.`) + suffix,
+      result.submitClicked || result.submitFound ? "ok" : "error"
     );
   } catch (error) {
     setStatus(`Bid failed: ${error.message}`, "error");

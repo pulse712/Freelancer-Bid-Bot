@@ -129,19 +129,90 @@ async function typeLikeHuman(element, text, speed) {
   element.dispatchEvent(new Event("change", { bubbles: true }));
 }
 
+function isVisible(element) {
+  if (!element || !element.isConnected) return false;
+  const rect = element.getBoundingClientRect();
+  if (rect.width === 0 || rect.height === 0) return false;
+  const style = getComputedStyle(element);
+  return style.visibility !== "hidden" && style.display !== "none";
+}
+
+function normalizedText(element) {
+  return (element.innerText || element.textContent || "").replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+function isDisabled(element) {
+  return Boolean(
+    element.disabled ||
+      element.getAttribute("aria-disabled") === "true" ||
+      element.closest("[aria-disabled='true'], [disabled]")
+  );
+}
+
+// Text patterns for the button that sends the bid, most specific first.
+const SUBMIT_TEXT = [/^place (a )?bid$/, /^submit (bid|proposal)$/, /^place bid/, /^submit$/, /^bid now$/];
+
 function findSubmitButton() {
-  for (const selector of SUBMIT_SELECTORS) {
-    for (const button of document.querySelectorAll(selector)) {
-      const text = button.textContent?.trim().toLowerCase() || "";
-      if (text.includes("place bid") || text.includes("submit") || text.includes("bid")) {
-        return button;
-      }
-    }
+  const explicit = document.querySelector(SUBMIT_SELECTORS[0]);
+  if (explicit && isVisible(explicit)) return explicit;
+
+  const candidates = [...document.querySelectorAll("button, [role='button'], input[type='submit'], a")].filter(
+    (element) => isVisible(element) && normalizedText(element).length < 40
+  );
+  for (const pattern of SUBMIT_TEXT) {
+    const match = candidates.find((element) => pattern.test(normalizedText(element) || element.value?.toLowerCase() || ""));
+    if (match) return match;
   }
   return null;
 }
 
-async function fillBid({ draft, autoSubmit, humanTyping, typingSpeed }) {
+async function waitForSubmitButton(timeoutMs = 10000) {
+  const start = Date.now();
+  let button = null;
+  while (Date.now() - start < timeoutMs) {
+    button = findSubmitButton();
+    if (button && !isDisabled(button)) return button;
+    await wait(400);
+  }
+  return button;
+}
+
+function checkboxState(element) {
+  if (element.matches("input[type='checkbox']")) return element.checked;
+  const aria = element.getAttribute("aria-checked");
+  if (aria !== null) return aria === "true";
+  return element.classList.contains("checked") || element.classList.contains("is-checked");
+}
+
+// Finds the checkbox next to an upgrade label such as "Sealed" and turns it on.
+async function selectUpgrade(labelPattern) {
+  const badges = [...document.querySelectorAll("span, div, label, p, b, strong")].filter(
+    (element) => isVisible(element) && labelPattern.test(normalizedText(element)) && normalizedText(element).length < 20
+  );
+  if (!badges.length) return "not found";
+
+  for (const badge of badges) {
+    let container = badge;
+    for (let depth = 0; depth < 7 && container; depth += 1, container = container.parentElement) {
+      const boxes = [...container.querySelectorAll("input[type='checkbox'], [role='checkbox'], [role='switch']")];
+      if (boxes.length !== 1) continue; // keep climbing until exactly this upgrade's checkbox is in view
+      const box = boxes[0];
+      if (checkboxState(box)) return "already selected";
+
+      const clickTargets = [box.closest("label"), box, badge];
+      for (const target of clickTargets) {
+        if (!target) continue;
+        target.click();
+        await wait(300);
+        if (checkboxState(box)) return "selected";
+      }
+      return "click did not register";
+    }
+  }
+  return "checkbox not found near label";
+}
+
+async function fillBid({ draft, autoSubmit, humanTyping, typingSpeed, sealedBid }) {
   if (!draft) {
     throw new Error("No draft text to fill.");
   }
@@ -155,16 +226,26 @@ async function fillBid({ draft, autoSubmit, humanTyping, typingSpeed }) {
     setNativeValue(bidInput, draft);
   }
 
-  const submitButton = findSubmitButton();
+  let sealed = "skipped";
+  if (sealedBid) {
+    await wait(randomBetween(400, 900));
+    sealed = await selectUpgrade(/^sealed$/);
+  }
+
+  const submitButton = await waitForSubmitButton(autoSubmit ? 10000 : 2000);
+  if (!autoSubmit) {
+    return { submitClicked: false, submitFound: Boolean(submitButton), sealed };
+  }
   if (!submitButton) {
-    throw new Error("Could not find submit/place-bid button.");
+    throw new Error("Bid typed, but the Place Bid button was not found on the page.");
   }
-  if (autoSubmit) {
-    await wait(randomBetween(700, 1800));
-    submitButton.scrollIntoView({ block: "center" });
-    submitButton.click();
+  if (isDisabled(submitButton)) {
+    throw new Error("Bid typed, but the Place Bid button is disabled. Check the amount and other required fields.");
   }
-  return { submitClicked: Boolean(autoSubmit) };
+  await wait(randomBetween(700, 1800));
+  submitButton.scrollIntoView({ block: "center" });
+  submitButton.click();
+  return { submitClicked: true, submitFound: true, sealed };
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {

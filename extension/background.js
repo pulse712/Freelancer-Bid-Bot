@@ -13,6 +13,7 @@ async function readSettings() {
     "workerName",
     "workerToken",
     "autoSubmit",
+    "sealedBid",
     "humanTyping",
     "typingSpeed",
     "automationEnabled",
@@ -123,14 +124,15 @@ async function sendToTab(tabId, message) {
 }
 
 async function fillBidInTab(tabId, settings, draft) {
-  const { submitClicked } = await sendToTab(tabId, {
+  const { submitClicked, submitFound, sealed } = await sendToTab(tabId, {
     type: "FILL_BID",
     draft,
     autoSubmit: Boolean(settings.autoSubmit),
+    sealedBid: settings.sealedBid !== false,
     humanTyping: settings.humanTyping !== false,
     typingSpeed: settings.typingSpeed || "normal"
   });
-  return submitClicked;
+  return { submitClicked, submitFound, sealed };
 }
 
 async function readProject(tabId, url) {
@@ -159,14 +161,14 @@ async function writeDraft(settings, project) {
 
 async function createBidInTab(tabId, settings, serverDraft, url) {
   if (serverDraft) {
-    const submitClicked = await fillBidInTab(tabId, settings, serverDraft);
-    return { draft: serverDraft, draftSource: "server", submitClicked };
+    const fill = await fillBidInTab(tabId, settings, serverDraft);
+    return { draft: serverDraft, draftSource: "server", ...fill };
   }
 
   const { project, projectSource } = await readProject(tabId, url);
   const { draft, draftSource } = await writeDraft(settings, project);
-  const submitClicked = await fillBidInTab(tabId, settings, draft);
-  return { project, projectSource, draft, draftSource, submitClicked };
+  const fill = await fillBidInTab(tabId, settings, draft);
+  return { project, projectSource, draft, draftSource, ...fill };
 }
 
 async function reportTaskResult(settings, payload) {
@@ -201,6 +203,8 @@ async function processTask(settings, task) {
       details: {
         pageUrl: task.url,
         submitClicked: result.submitClicked,
+        submitFound: result.submitFound,
+        sealed: result.sealed,
         draftSource: result.draftSource,
         workerName: settings.workerName || ""
       }
