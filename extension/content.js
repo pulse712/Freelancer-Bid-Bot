@@ -630,8 +630,94 @@ function looksLikeSignerUi(root = document) {
   if (signatureTargets(root).length) return true;
   if (signatureCanvas(root)) return true;
   if (findField(root, "name") || findField(root, "address")) return true;
+  if (requiredStepButtons(root).length) return true;
   const text = (root.innerText || "").slice(0, 8000);
-  return /your name goes here|click to sign|please sign|type your name/i.test(text);
+  return /your name goes here|click to sign|please sign|type your name|complete these steps|\+ add (signature|full name|full address)/i.test(text);
+}
+
+function requiredStepButtons(root) {
+  const nodes = queryDeep(root, "a, button, [role='button'], [role='link'], div, span, td");
+  const matches = nodes.filter((element) => {
+    if (!isVisible(element)) return false;
+    const text = normalizedText(element);
+    return text.length < 40 && /^\+?\s*add (signature|full name|full address)$/i.test(text);
+  });
+  return matches.filter((element) => !matches.some((other) => other !== element && element.contains(other)));
+}
+
+function stepKind(text) {
+  if (/signature/i.test(text)) return "signature";
+  if (/address/i.test(text)) return "address";
+  if (/name/i.test(text)) return "name";
+  return "name";
+}
+
+async function waitForPopupField(timeoutMs = 6000) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const dialog = dialogRoots().slice(-1)[0];
+    const scope = dialog || document;
+    const field =
+      findField(scope, "name") ||
+      findField(scope, "address") ||
+      queryDeep(scope, "input:not([type='hidden']):not([type='checkbox']):not([type='radio']), textarea, [contenteditable='true']").find(isVisible);
+    if (field) return { scope, field };
+    if (signatureCanvas(scope)) return { scope, canvas: signatureCanvas(scope) };
+    await wait(250);
+  }
+  return { scope: dialogRoots().slice(-1)[0] || document };
+}
+
+async function confirmPopup(scope) {
+  await clickIfPresent(scope, INSERT_PATTERNS);
+  await clickIfPresent(scope, [/^insert$/, /^ok$/, /^save$/, /^apply$/, /^done$/]);
+  await wait(400);
+}
+
+async function completeRequiredSteps(root, signerName, signerAddress) {
+  let filledName = false;
+  let filledAddress = false;
+  let drew = false;
+  const seen = new Set();
+
+  for (let round = 0; round < 6; round += 1) {
+    const buttons = requiredStepButtons(root);
+    const next = buttons.find((button) => !seen.has(normalizedText(button)));
+    if (!next) break;
+    const kind = stepKind(normalizedText(next));
+    seen.add(normalizedText(next));
+    await humanClick(next);
+    next.click();
+    await wait(500);
+    const popup = await waitForPopupField();
+    const value = kind === "address" ? signerAddress : signerName;
+    if (kind === "signature") {
+      const canvas = popup.canvas || signatureCanvas(popup.scope);
+      const typeTab = findActionButton(popup.scope, [/^type$/, /^keyboard$/]);
+      if (typeTab) {
+        await humanClick(typeTab);
+        typeTab.click();
+        await wait(300);
+      }
+      const field = popup.field || findField(popup.scope, "name");
+      if (field && signerName) {
+        await typeIntoField(field, signerName);
+        filledName = true;
+      } else if (canvas && signerName) {
+        await drawSignature(canvas, signerName);
+        drew = true;
+      }
+    } else if (value) {
+      const field = popup.field || findField(popup.scope, kind);
+      if (field) {
+        await typeIntoField(field, value);
+        if (kind === "address") filledAddress = true;
+        else filledName = true;
+      }
+    }
+    await confirmPopup(popup.scope);
+  }
+  return { filledName, filledAddress, drew };
 }
 
 async function fillAgreementForm(root, signerName, signerAddress) {
@@ -639,9 +725,10 @@ async function fillAgreementForm(root, signerName, signerAddress) {
     await clickIfPresent(root, [pattern]);
   }
 
-  let filledName = false;
-  let filledAddress = false;
-  let drew = false;
+  const steps = await completeRequiredSteps(root, signerName, signerAddress);
+  let filledName = steps.filledName;
+  let filledAddress = steps.filledAddress;
+  let drew = steps.drew;
 
   const nameField = findField(root, "name");
   if (nameField && signerName && (nameField.value || nameField.textContent || "").trim() !== signerName) {
