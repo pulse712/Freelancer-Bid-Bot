@@ -24,9 +24,6 @@ module.exports = `<!doctype html>
 <body>
   <h1>Bid Bot Dashboard</h1>
 
-  <label for="adminKey">Admin key</label>
-  <input id="adminKey" type="password" placeholder="ADMIN_KEY from server env" />
-
   <h2>Queue projects</h2>
   <label for="workerId">Worker ID</label>
   <input id="workerId" list="workerList" placeholder="acc-1" />
@@ -49,23 +46,17 @@ module.exports = `<!doctype html>
   </table>
 
   <script>
-    const adminKeyEl = document.getElementById("adminKey");
     const workerIdEl = document.getElementById("workerId");
     const urlsEl = document.getElementById("urls");
     const messageEl = document.getElementById("message");
     const ONLINE_WINDOW_MS = 90 * 1000;
 
-    adminKeyEl.value = localStorage.getItem("bidbotAdminKey") || "";
     workerIdEl.value = localStorage.getItem("bidbotWorkerId") || "";
-    adminKeyEl.addEventListener("change", () => {
-      localStorage.setItem("bidbotAdminKey", adminKeyEl.value.trim());
-      refresh();
-    });
 
     async function api(path, options = {}) {
       const response = await fetch(path, {
         ...options,
-        headers: { "Content-Type": "application/json", "x-admin-key": adminKeyEl.value.trim() }
+        headers: { "Content-Type": "application/json" }
       });
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.error || response.status);

@@ -18,7 +18,7 @@ A task that gets no result within `TASK_TIMEOUT_MS` is re-queued, up to `MAX_ATT
 
 ```bash
 npm install
-cp .env.example .env   # set ADMIN_KEY and WORKER_TOKEN
+cp .env.example .env   # set WORKER_TOKEN
 npm run dev
 ```
 
@@ -28,7 +28,7 @@ Open `http://localhost:8787/`. Without Upstash variables the server uses in-memo
 
 1. Import this folder as a Vercel project (`extension/` is excluded by `.vercelignore`).
 2. Add the Upstash Redis integration from the Vercel Marketplace. It sets the storage env variables automatically.
-3. Set `ADMIN_KEY` and `WORKER_TOKEN` in the project env settings.
+3. Set `WORKER_TOKEN` in the project env settings.
 4. Deploy and check `https://<your-app>.vercel.app/health` – it should show `"storage": "redis"`.
 
 ## Install the extension (per Octo profile / VPS browser)
@@ -46,11 +46,11 @@ Open `http://localhost:8787/`. Without Upstash variables the server uses in-memo
 
 | Endpoint | Auth header | Purpose |
 | --- | --- | --- |
-| `POST /api/tasks` | `x-admin-key` | Queue `{ workerId, url }` or `{ workerId, urls: [] }` |
-| `GET /api/tasks` | `x-admin-key` | Recent tasks |
-| `POST /api/tasks/:id/retry` | `x-admin-key` | Re-queue a finished or failed task |
-| `GET /api/workers` | `x-admin-key` | Workers and last poll time |
-| `GET /api/results` | `x-admin-key` | Recent results |
+| `POST /api/tasks` | none | Queue `{ workerId, url }` or `{ workerId, urls: [] }` |
+| `GET /api/tasks` | none | Recent tasks |
+| `POST /api/tasks/:id/retry` | none | Re-queue a finished or failed task |
+| `GET /api/workers` | none | Workers and last poll time |
+| `GET /api/results` | none | Recent results |
 | `GET /api/worker/next-task?workerId=` | `x-worker-token` | Claim the next task |
 | `POST /api/worker/task-result` | `x-worker-token` | Report `success` / `fail` |
 | `POST /api/draft-bid` | `x-worker-token` | Generate a bid |

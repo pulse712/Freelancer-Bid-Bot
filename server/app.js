@@ -6,7 +6,6 @@ const store = require("./store");
 const dashboardHtml = require("./dashboard");
 const { generateDraft, buildTemplateDraft } = require("./ai");
 
-const ADMIN_KEY = process.env.ADMIN_KEY || "";
 const WORKER_TOKEN = process.env.WORKER_TOKEN || "";
 const TASK_TIMEOUT_MS = Number(process.env.TASK_TIMEOUT_MS || 5 * 60 * 1000);
 const MAX_ATTEMPTS = Number(process.env.MAX_ATTEMPTS || 2);
@@ -15,17 +14,12 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: "2mb" }));
 
-function requireHeader(headerName, expected, label) {
-  return (req, res, next) => {
-    if (!expected || req.headers[headerName] === expected) {
-      return next();
-    }
-    return res.status(401).json({ error: `Unauthorized ${label} request` });
-  };
+function checkWorker(req, res, next) {
+  if (!WORKER_TOKEN || req.headers["x-worker-token"] === WORKER_TOKEN) {
+    return next();
+  }
+  return res.status(401).json({ error: "Unauthorized worker request" });
 }
-
-const checkAdmin = requireHeader("x-admin-key", ADMIN_KEY, "admin");
-const checkWorker = requireHeader("x-worker-token", WORKER_TOKEN, "worker");
 
 function asyncRoute(handler) {
   return (req, res) => {
@@ -64,7 +58,6 @@ app.get("/health", (_req, res) => {
 
 app.post(
   "/api/tasks",
-  checkAdmin,
   asyncRoute(async (req, res) => {
     const { workerId, url, urls, meta } = req.body || {};
     const list = (Array.isArray(urls) ? urls : [url]).map((item) => String(item || "").trim()).filter(Boolean);
@@ -99,7 +92,6 @@ app.post(
 
 app.get(
   "/api/tasks",
-  checkAdmin,
   asyncRoute(async (req, res) => {
     const tasks = await store.listRecentTasks(100);
     const workerId = req.query.workerId;
@@ -109,7 +101,6 @@ app.get(
 
 app.post(
   "/api/tasks/:id/retry",
-  checkAdmin,
   asyncRoute(async (req, res) => {
     const task = await store.getTask(req.params.id);
     if (!task) {
@@ -127,7 +118,6 @@ app.post(
 
 app.get(
   "/api/results",
-  checkAdmin,
   asyncRoute(async (req, res) => {
     const results = await store.listResults(200);
     const workerId = req.query.workerId;
@@ -137,7 +127,6 @@ app.get(
 
 app.get(
   "/api/workers",
-  checkAdmin,
   asyncRoute(async (_req, res) => {
     return res.json({ workers: await store.listWorkers() });
   })
