@@ -171,21 +171,54 @@ async function createBidInTab(tabId, settings, serverDraft, url) {
   return { project, projectSource, draft, draftSource, ...fill };
 }
 
-// Sends a real mouse click through Chrome's debugger interface. The page sees a trusted click,
-// exactly as if the user pressed the mouse at that spot. Coordinates are CSS pixels in the viewport.
-async function trustedClick(tabId, x, y) {
+// Real (trusted) input through Chrome's debugger interface. The page cannot tell it from the user's own
+// mouse and keyboard. Coordinates are CSS pixels in the viewport.
+const KEYS = {
+  Enter: { key: "Enter", code: "Enter", windowsVirtualKeyCode: 13, text: "\r" },
+  Backspace: { key: "Backspace", code: "Backspace", windowsVirtualKeyCode: 8 },
+  Tab: { key: "Tab", code: "Tab", windowsVirtualKeyCode: 9 },
+  Space: { key: " ", code: "Space", windowsVirtualKeyCode: 32, text: " " }
+};
+
+async function withDebugger(tabId, run) {
   const target = { tabId };
   await chrome.debugger.attach(target, "1.3");
   try {
-    const base = { x: Math.round(x), y: Math.round(y), button: "left", clickCount: 1 };
-    await chrome.debugger.sendCommand(target, "Input.dispatchMouseEvent", { ...base, type: "mouseMoved" });
-    await wait(60 + Math.random() * 80);
-    await chrome.debugger.sendCommand(target, "Input.dispatchMouseEvent", { ...base, type: "mousePressed", buttons: 1 });
-    await wait(50 + Math.random() * 90);
-    await chrome.debugger.sendCommand(target, "Input.dispatchMouseEvent", { ...base, type: "mouseReleased", buttons: 0 });
+    return await run((method, params) => chrome.debugger.sendCommand(target, method, params));
   } finally {
     await chrome.debugger.detach(target).catch(() => {});
   }
+}
+
+async function trustedClick(tabId, x, y) {
+  await withDebugger(tabId, async (send) => {
+    const base = { x: Math.round(x), y: Math.round(y), button: "left", clickCount: 1 };
+    await send("Input.dispatchMouseEvent", { ...base, type: "mouseMoved" });
+    await wait(60 + Math.random() * 80);
+    await send("Input.dispatchMouseEvent", { ...base, type: "mousePressed", buttons: 1 });
+    await wait(50 + Math.random() * 90);
+    await send("Input.dispatchMouseEvent", { ...base, type: "mouseReleased", buttons: 0 });
+  });
+  return {};
+}
+
+// actions: [{ key: "Enter" }, { text: "..." }, ...] executed in order on the focused element.
+async function trustedInput(tabId, actions) {
+  await withDebugger(tabId, async (send) => {
+    for (const action of actions) {
+      if (action.key) {
+        const spec = KEYS[action.key];
+        if (!spec) throw new Error(`Unknown key ${action.key}`);
+        const { text, ...keyBase } = spec;
+        await send("Input.dispatchKeyEvent", { type: "keyDown", ...keyBase, ...(text ? { text } : {}) });
+        await wait(30 + Math.random() * 60);
+        await send("Input.dispatchKeyEvent", { type: "keyUp", ...keyBase });
+      } else if (typeof action.text === "string") {
+        await send("Input.insertText", { text: action.text });
+      }
+      await wait(80 + Math.random() * 120);
+    }
+  });
   return {};
 }
 
@@ -331,6 +364,15 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       return false;
     }
     return respondWith(trustedClick(tabId, message.x, message.y), sendResponse);
+  }
+
+  if (message?.type === "TRUSTED_INPUT") {
+    const tabId = _sender?.tab?.id;
+    if (!tabId) {
+      sendResponse({ ok: false, error: "No tab for trusted input" });
+      return false;
+    }
+    return respondWith(trustedInput(tabId, message.actions || []), sendResponse);
   }
 
   if (message?.type === "MANUAL_OPEN_URL") {
