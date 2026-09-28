@@ -1,0 +1,19 @@
+{
+  "name": "freelancer-bid-bot",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Task server for Freelancer Bid Bot extension workers",
+  "main": "server/index.js",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.6.1",
+    "express": "^4.21.2"
+  }
+}

@@ -1,0 +1,39 @@
+{
+  "manifest_version": 3,
+  "name": "Freelancer Bid Bot (Starter)",
+  "description": "Draft tailored bids from Freelancer project pages.",
+  "version": "0.1.0",
+  "action": {
+    "default_title": "Bid Bot"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage",
+    "sidePanel",
+    "tabs",
+    "alarms"
+  ],
+  "host_permissions": [
+    "https://www.freelancer.com/*",
+    "http://*/*",
+    "https://*/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.freelancer.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}

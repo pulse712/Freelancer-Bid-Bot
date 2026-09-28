@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Bid Bot Side Panel</title>
+    <link rel="stylesheet" href="sidepanel.css" />
+  </head>
+  <body>
+    <main class="panel">
+      <h1>Bid Bot</h1>
+      <p id="status">Open a Freelancer project page, then click extract.</p>
+
+      <section>
+        <h2>Settings</h2>
+        <label for="apiBaseUrl">Backend URL</label>
+        <input id="apiBaseUrl" type="text" placeholder="http://localhost:8787" />
+        <label for="profileInput">Your profile summary</label>
+        <textarea
+          id="profileInput"
+          rows="4"
+          placeholder="Example: Full-stack dev, 6 years, React/Node, quick communication."
+        ></textarea>
+        <label for="workerId">Worker ID (account label)</label>
+        <input id="workerId" type="text" placeholder="acc-1" />
+        <label for="workerToken">Worker Token</label>
+        <input id="workerToken" type="password" placeholder="shared worker token" />
+        <label for="aiProvider">AI Provider</label>
+        <select id="aiProvider">
+          <option value="">Template fallback only</option>
+          <option value="openai">OpenAI</option>
+          <option value="claude">Claude</option>
+          <option value="gemini">Gemini</option>
+          <option value="cursor">Cursor-compatible</option>
+        </select>
+        <label for="aiApiKey">AI API Key</label>
+        <input id="aiApiKey" type="password" placeholder="provider API key" />
+        <label for="aiModel">AI Model</label>
+        <input id="aiModel" type="text" placeholder="gpt-4o-mini / claude-3-5-sonnet / gemini-1.5-pro" />
+        <label for="aiBaseUrl">AI Base URL (optional)</label>
+        <input id="aiBaseUrl" type="text" placeholder="custom endpoint if needed" />
+        <label class="check-row">
+          <input id="autoSubmit" type="checkbox" />
+          Auto click submit button
+        </label>
+      </section>
+
+      <section>
+        <h2>Automation</h2>
+        <label for="manualProjectUrl">Freelancer project URL</label>
+        <input
+          id="manualProjectUrl"
+          type="text"
+          placeholder="https://www.freelancer.com/projects/..."
+        />
+        <div class="row">
+          <button id="createBidFromUrlBtn" type="button">Go + Create Bid</button>
+        </div>
+        <div class="row">
+          <button id="startAutoBtn" type="button">Start Auto</button>
+          <button id="stopAutoBtn" type="button">Stop Auto</button>
+          <button id="runNowBtn" type="button">Run Now</button>
+        </div>
+        <p id="autoStatus">Auto mode is off.</p>
+      </section>
+
+      <div class="row">
+        <button id="extractBtn" type="button">Extract Project</button>
+        <button id="draftBtn" type="button" disabled>Draft Bid</button>
+      </div>
+
+      <section>
+        <h2>Project</h2>
+        <pre id="projectData">No project data yet.</pre>
+      </section>
+
+      <section>
+        <h2>Draft</h2>
+        <textarea
+          id="draftOutput"
+          rows="12"
+          placeholder="Your generated bid will appear here..."
+        ></textarea>
+      </section>
+    </main>
+
+    <script src="sidepanel.app.js"></script>
+  </body>
+</html>

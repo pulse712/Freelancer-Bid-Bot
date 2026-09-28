@@ -1,0 +1,262 @@
+const ALARM_NAME = "bidbot-poll";
+const POLL_PERIOD_MINUTES = 0.5;
+const MAX_TASKS_PER_TICK = 5;
+
+let tickInProgress = false;
+
+async function readSettings() {
+  return chrome.storage.local.get([
+    "apiBaseUrl",
+    "profileSummary",
+    "workerId",
+    "workerToken",
+    "aiProvider",
+    "aiApiKey",
+    "aiModel",
+    "aiBaseUrl",
+    "autoSubmit",
+    "automationEnabled",
+    "workerTabId"
+  ]);
+}
+
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isFreelancerUrl(url) {
+  return /^https?:\/\/(www\.)?freelancer\.com\/.+/i.test(url || "");
+}
+
+async function apiFetch(settings, path, options = {}) {
+  const baseUrl = (settings.apiBaseUrl || "http://localhost:8787").replace(/\/+$/, "");
+  const headers = { "Content-Type": "application/json" };
+  if (settings.workerToken) {
+    headers["x-worker-token"] = settings.workerToken;
+  }
+  const response = await fetch(`${baseUrl}${path}`, { ...options, headers });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(`${path} failed (${response.status}): ${payload.error || "no details"}`);
+  }
+  return payload;
+}
+
+function waitForTabComplete(tabId, timeoutMs = 30000) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      chrome.tabs.onUpdated.removeListener(listener);
+      reject(new Error("Tab load timeout"));
+    }, timeoutMs);
+
+    function listener(updatedTabId, changeInfo) {
+      if (updatedTabId === tabId && changeInfo.status === "complete") {
+        clearTimeout(timer);
+        chrome.tabs.onUpdated.removeListener(listener);
+        resolve();
+      }
+    }
+    chrome.tabs.onUpdated.addListener(listener);
+  });
+}
+
+async function navigateWorkerTab(url) {
+  const { workerTabId } = await readSettings();
+  let tab = null;
+  if (workerTabId) {
+    tab = await chrome.tabs.get(workerTabId).catch(() => null);
+  }
+
+  const loaded = tab ? waitForTabComplete(tab.id) : null;
+  if (tab) {
+    await chrome.tabs.update(tab.id, { url, active: true });
+    await loaded;
+    return tab;
+  }
+
+  tab = await chrome.tabs.create({ url, active: true });
+  await chrome.storage.local.set({ workerTabId: tab.id });
+  await waitForTabComplete(tab.id);
+  return tab;
+}
+
+async function sendToTab(tabId, message) {
+  let lastError = null;
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    try {
+      const response = await chrome.tabs.sendMessage(tabId, message);
+      if (!response?.ok) {
+        throw new Error(response?.error || `${message.type} failed in page`);
+      }
+      return response;
+    } catch (error) {
+      lastError = error;
+      if (!String(error.message).includes("Receiving end does not exist")) {
+        throw error;
+      }
+      await wait(500);
+    }
+  }
+  throw lastError;
+}
+
+async function createBidInTab(tabId, settings) {
+  const { project } = await sendToTab(tabId, { type: "EXTRACT_PROJECT" });
+
+  const { draft, source, warning } = await apiFetch(settings, "/api/draft-bid", {
+    method: "POST",
+    body: JSON.stringify({
+      project,
+      profileSummary: settings.profileSummary || "",
+      aiConfig: {
+        provider: settings.aiProvider || "",
+        apiKey: settings.aiApiKey || "",
+        model: settings.aiModel || "",
+        baseUrl: settings.aiBaseUrl || ""
+      }
+    })
+  });
+
+  const { submitClicked } = await sendToTab(tabId, {
+    type: "FILL_BID",
+    draft,
+    autoSubmit: Boolean(settings.autoSubmit)
+  });
+
+  return { project, draft, source, warning, submitClicked };
+}
+
+async function reportTaskResult(settings, payload) {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      await apiFetch(settings, "/api/worker/task-result", {
+        method: "POST",
+        body: JSON.stringify(payload)
+      });
+      return;
+    } catch (error) {
+      console.error("Result report failed:", error);
+      await wait(2000);
+    }
+  }
+}
+
+async function processTask(settings, task) {
+  const base = { taskId: task.id, workerId: settings.workerId };
+  if (!isFreelancerUrl(task.url)) {
+    await reportTaskResult(settings, { ...base, status: "fail", details: { error: "Invalid URL in task" } });
+    return;
+  }
+
+  try {
+    const tab = await navigateWorkerTab(task.url);
+    const result = await createBidInTab(tab.id, settings);
+    await reportTaskResult(settings, {
+      ...base,
+      status: "success",
+      details: {
+        pageUrl: task.url,
+        submitClicked: result.submitClicked,
+        draftSource: result.source,
+        warning: result.warning || null
+      }
+    });
+  } catch (error) {
+    await reportTaskResult(settings, {
+      ...base,
+      status: "fail",
+      details: { pageUrl: task.url, error: error.message }
+    });
+  }
+}
+
+async function processAutomationTick() {
+  if (tickInProgress) {
+    return;
+  }
+  tickInProgress = true;
+  try {
+    const settings = await readSettings();
+    if (!settings.automationEnabled) {
+      return;
+    }
+    if (!settings.workerId) {
+      throw new Error("Worker ID is missing in settings.");
+    }
+
+    for (let count = 0; count < MAX_TASKS_PER_TICK; count += 1) {
+      const { task } = await apiFetch(
+        settings,
+        `/api/worker/next-task?workerId=${encodeURIComponent(settings.workerId)}`
+      );
+      if (!task) {
+        return;
+      }
+      await processTask(settings, task);
+    }
+  } finally {
+    tickInProgress = false;
+  }
+}
+
+async function enableAutomation() {
+  await chrome.storage.local.set({ automationEnabled: true });
+  await chrome.alarms.create(ALARM_NAME, { periodInMinutes: POLL_PERIOD_MINUTES });
+}
+
+async function disableAutomation() {
+  await chrome.storage.local.set({ automationEnabled: false });
+  await chrome.alarms.clear(ALARM_NAME);
+}
+
+function respondWith(promise, sendResponse) {
+  promise
+    .then((result) => sendResponse({ ok: true, ...(result || {}) }))
+    .catch((error) => sendResponse({ ok: false, error: error.message }));
+  return true;
+}
+
+chrome.runtime.onInstalled.addListener(async () => {
+  await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
+});
+
+chrome.runtime.onStartup.addListener(async () => {
+  const settings = await readSettings();
+  if (settings.automationEnabled) {
+    await chrome.alarms.create(ALARM_NAME, { periodInMinutes: POLL_PERIOD_MINUTES });
+  }
+});
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === ALARM_NAME) {
+    processAutomationTick().catch((error) => console.error("Automation tick failed:", error));
+  }
+});
+
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message?.type === "MANUAL_CREATE_BID_FROM_URL") {
+    const url = (message.url || "").trim();
+    if (!isFreelancerUrl(url)) {
+      sendResponse({ ok: false, error: "Invalid Freelancer URL." });
+      return false;
+    }
+    return respondWith(
+      readSettings().then(async (settings) => {
+        const tab = await navigateWorkerTab(url);
+        return createBidInTab(tab.id, settings);
+      }),
+      sendResponse
+    );
+  }
+
+  if (message?.type === "AUTOMATION_START") {
+    return respondWith(enableAutomation(), sendResponse);
+  }
+  if (message?.type === "AUTOMATION_STOP") {
+    return respondWith(disableAutomation(), sendResponse);
+  }
+  if (message?.type === "AUTOMATION_RUN_NOW") {
+    return respondWith(processAutomationTick(), sendResponse);
+  }
+  return false;
+});
