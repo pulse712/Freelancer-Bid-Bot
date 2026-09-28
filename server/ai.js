@@ -1,101 +1,87 @@
-function buildPrompt(project, profileSummary) {
-  return [
-    "You are an expert freelancer writing high-converting bids.",
-    "Return only the proposal text in plain format.",
-    "Length: 120-220 words. Tone: confident, practical, professional.",
-    "Mention understanding of project, 3 concise strengths, short execution steps, and call-to-action.",
-    "",
-    "Freelancer profile:",
-    profileSummary || "Skilled freelancer with consistent delivery and communication.",
-    "",
-    "Project context:",
-    `Title: ${project.title || ""}`,
-    `Description: ${project.description || ""}`,
-    `Budget: ${project.budget || ""}`,
-    `URL: ${project.pageUrl || ""}`
-  ].join("\n");
+const DEFAULT_PROMPT = `You are an experienced freelancer writing a bid for the Freelancer.com project below.
+Write only the proposal text: plain text, no markdown, 120-220 words.
+Show you understood the project, give 3 short reasons you are a good fit, outline a 2-3 step plan, and end with a clear call to action.
+
+Title: {title}
+Budget: {budget}
+Skills: {skills}
+Description:
+{description}`;
+
+const DEFAULT_MODELS = {
+  openai: "gpt-4o-mini",
+  cursor: "gpt-4o-mini",
+  claude: "claude-3-5-sonnet-latest",
+  gemini: "gemini-1.5-pro"
+};
+
+const PLACEHOLDERS = ["title", "description", "budget", "skills", "url"];
+
+function renderPrompt(template, project) {
+  const values = {
+    title: project.title,
+    description: project.description,
+    budget: project.budget,
+    skills: project.skills,
+    url: project.pageUrl
+  };
+  const pattern = new RegExp(`\\{(${PLACEHOLDERS.join("|")})\\}`, "g");
+  return (template || DEFAULT_PROMPT).replace(pattern, (_match, key) => values[key] || "");
 }
 
-function buildTemplateDraft(project, profileSummary) {
-  const summary = profileSummary || "Skilled freelancer with reliable delivery and communication.";
-  return [
-    "Hello,",
-    "",
-    `I reviewed your project: "${project.title || "Project"}".`,
-    "I can deliver this efficiently with clear milestones and frequent updates.",
-    "",
-    "Why I am a strong fit:",
-    `- ${summary}`,
-    "- Hands-on experience delivering similar client projects.",
-    "- Clear communication and quick iteration cycles.",
-    "",
-    "Proposed execution:",
-    "1) Confirm requirements and acceptance criteria",
-    "2) Deliver first working milestone quickly",
-    "3) Refine and finalize after your feedback",
-    "",
-    "If this matches your expectations, I can start immediately.",
-    "Best regards"
-  ].join("\n");
+async function readJson(response, label) {
+  if (!response.ok) {
+    const body = await response.text().catch(() => "");
+    throw new Error(`${label} returned ${response.status}: ${body.slice(0, 200)}`);
+  }
+  return response.json();
 }
 
-async function callOpenAICompatible(prompt, aiConfig) {
-  const endpoint = aiConfig.baseUrl || "https://api.openai.com/v1/chat/completions";
-  const response = await fetch(endpoint, {
+async function callOpenAICompatible(prompt, settings, model) {
+  const response = await fetch(settings.baseUrl || "https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${aiConfig.apiKey}`
+      Authorization: `Bearer ${settings.apiKey}`
     },
     body: JSON.stringify({
-      model: aiConfig.model || "gpt-4o-mini",
+      model,
       temperature: 0.5,
       messages: [{ role: "user", content: prompt }]
     })
   });
-  if (!response.ok) {
-    throw new Error(`OpenAI-compatible call failed (${response.status})`);
-  }
-  const payload = await response.json();
+  const payload = await readJson(response, "OpenAI-compatible API");
   return payload?.choices?.[0]?.message?.content?.trim();
 }
 
-async function callClaude(prompt, aiConfig) {
-  const endpoint = aiConfig.baseUrl || "https://api.anthropic.com/v1/messages";
-  const response = await fetch(endpoint, {
+async function callClaude(prompt, settings, model) {
+  const response = await fetch(settings.baseUrl || "https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "x-api-key": aiConfig.apiKey,
+      "x-api-key": settings.apiKey,
       "anthropic-version": "2023-06-01"
     },
     body: JSON.stringify({
-      model: aiConfig.model || "claude-3-5-sonnet-latest",
-      max_tokens: 600,
+      model,
+      max_tokens: 800,
       messages: [{ role: "user", content: prompt }]
     })
   });
-  if (!response.ok) {
-    throw new Error(`Claude call failed (${response.status})`);
-  }
-  const payload = await response.json();
+  const payload = await readJson(response, "Claude API");
   return payload?.content?.find((item) => item.type === "text")?.text?.trim();
 }
 
-async function callGemini(prompt, aiConfig) {
-  const model = aiConfig.model || "gemini-1.5-pro";
+async function callGemini(prompt, settings, model) {
   const endpoint =
-    aiConfig.baseUrl ||
-    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(aiConfig.apiKey)}`;
+    settings.baseUrl ||
+    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(settings.apiKey)}`;
   const response = await fetch(endpoint, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
   });
-  if (!response.ok) {
-    throw new Error(`Gemini call failed (${response.status})`);
-  }
-  const payload = await response.json();
+  const payload = await readJson(response, "Gemini API");
   return payload?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
 }
 
@@ -106,19 +92,20 @@ const PROVIDERS = {
   gemini: callGemini
 };
 
-async function generateDraft(project, profileSummary, aiConfig) {
-  if (!aiConfig?.provider || !aiConfig?.apiKey) {
-    return { draft: buildTemplateDraft(project, profileSummary), source: "template" };
-  }
-  const call = PROVIDERS[aiConfig.provider];
+async function generateBid(project, settings) {
+  const call = PROVIDERS[settings.provider];
   if (!call) {
-    throw new Error(`Unsupported provider: ${aiConfig.provider}`);
+    throw new Error("No AI provider selected in Settings");
   }
-  const draft = await call(buildPrompt(project, profileSummary), aiConfig);
+  if (!settings.apiKey) {
+    throw new Error("No AI API key saved in Settings");
+  }
+  const model = settings.model || DEFAULT_MODELS[settings.provider];
+  const draft = await call(renderPrompt(settings.prompt, project), settings, model);
   if (!draft) {
-    throw new Error("Provider returned empty draft");
+    throw new Error("AI provider returned an empty bid");
   }
-  return { draft, source: aiConfig.provider };
+  return draft;
 }
 
-module.exports = { generateDraft, buildTemplateDraft };
+module.exports = { generateBid, DEFAULT_PROMPT, DEFAULT_MODELS, PLACEHOLDERS };

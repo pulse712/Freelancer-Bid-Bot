@@ -4,7 +4,8 @@ require("dotenv").config();
 
 const store = require("./store");
 const dashboardHtml = require("./dashboard");
-const { generateDraft, buildTemplateDraft } = require("./ai");
+const { generateBid, DEFAULT_PROMPT, DEFAULT_MODELS, PLACEHOLDERS } = require("./ai");
+const { fetchProject } = require("./freelancer");
 
 const WORKER_TOKEN = process.env.WORKER_TOKEN || "";
 const TASK_TIMEOUT_MS = Number(process.env.TASK_TIMEOUT_MS || 5 * 60 * 1000);
@@ -48,6 +49,42 @@ async function expireStaleTasks(workerId) {
   }
 }
 
+async function prepareTask(task, settings) {
+  task.project = null;
+  task.draft = null;
+  task.note = null;
+  task.result = null;
+  task.status = "queued";
+
+  try {
+    task.project = await fetchProject(task.url);
+  } catch (error) {
+    task.note = `Project lookup failed (${error.message}); the worker will read the page and request the bid.`;
+    return task;
+  }
+
+  try {
+    task.draft = await generateBid(task.project, settings);
+  } catch (error) {
+    task.status = "failed";
+    task.result = { error: `Bid generation failed: ${error.message}` };
+  }
+  return task;
+}
+
+function publicSettings(settings) {
+  return {
+    provider: settings.provider || "",
+    model: settings.model || "",
+    baseUrl: settings.baseUrl || "",
+    prompt: settings.prompt || DEFAULT_PROMPT,
+    apiKeySet: Boolean(settings.apiKey),
+    apiKeyHint: settings.apiKey ? `…${settings.apiKey.slice(-4)}` : "",
+    defaultModels: DEFAULT_MODELS,
+    placeholders: PLACEHOLDERS
+  };
+}
+
 app.get("/", (_req, res) => {
   res.type("html").send(dashboardHtml);
 });
@@ -70,22 +107,25 @@ app.post(
       return res.status(400).json({ error: `Not freelancer.com URLs: ${invalid.join(", ")}` });
     }
 
-    const tasks = [];
-    for (const item of list) {
-      tasks.push(
-        await store.createTask({
-          id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
-          workerId,
-          url: item,
-          type: "create_bid",
-          status: "queued",
-          attempts: 0,
-          meta: meta || null,
-          createdAt: new Date().toISOString(),
-          claimedAt: null
-        })
-      );
-    }
+    const settings = await store.getSettings();
+    const tasks = await Promise.all(
+      list.map(async (item) => {
+        const task = await prepareTask(
+          {
+            id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+            workerId,
+            url: item,
+            type: "create_bid",
+            attempts: 0,
+            meta: meta || null,
+            createdAt: new Date().toISOString(),
+            claimedAt: null
+          },
+          settings
+        );
+        return store.createTask(task);
+      })
+    );
     return res.json({ ok: true, tasks });
   })
 );
@@ -110,8 +150,12 @@ app.post(
       return res.status(409).json({ error: `Task is already ${task.status}` });
     }
     task.attempts = 0;
-    task.result = null;
-    await store.requeueTask(task);
+    await prepareTask(task, await store.getSettings());
+    if (task.status === "queued") {
+      await store.requeueTask(task);
+    } else {
+      await store.saveTask(task);
+    }
     return res.json({ ok: true, task });
   })
 );
@@ -163,21 +207,49 @@ app.post(
   })
 );
 
-app.post("/api/draft-bid", checkWorker, async (req, res) => {
-  const { project, profileSummary, aiConfig } = req.body || {};
-  if (!project || !project.title) {
-    return res.status(400).json({ error: "Missing project payload" });
-  }
-  try {
-    return res.json(await generateDraft(project, profileSummary, aiConfig));
-  } catch (error) {
-    console.error("Draft generation failed:", error.message);
-    return res.json({
-      draft: buildTemplateDraft(project, profileSummary),
-      source: "template-fallback",
-      warning: error.message
-    });
-  }
-});
+app.get(
+  "/api/settings",
+  asyncRoute(async (_req, res) => {
+    return res.json({ settings: publicSettings(await store.getSettings()) });
+  })
+);
+
+app.put(
+  "/api/settings",
+  asyncRoute(async (req, res) => {
+    const { provider, apiKey, model, baseUrl, prompt, clearApiKey } = req.body || {};
+    const current = await store.getSettings();
+    const next = {
+      ...current,
+      provider: String(provider ?? current.provider ?? "").trim(),
+      model: String(model ?? current.model ?? "").trim(),
+      baseUrl: String(baseUrl ?? current.baseUrl ?? "").trim(),
+      prompt: String(prompt ?? current.prompt ?? "").trim()
+    };
+    if (clearApiKey) {
+      next.apiKey = "";
+    } else if (apiKey && String(apiKey).trim()) {
+      next.apiKey = String(apiKey).trim();
+    }
+    await store.saveSettings(next);
+    return res.json({ ok: true, settings: publicSettings(next) });
+  })
+);
+
+app.post(
+  "/api/draft-bid",
+  checkWorker,
+  asyncRoute(async (req, res) => {
+    const { project } = req.body || {};
+    if (!project || !project.title) {
+      return res.status(400).json({ error: "Missing project payload" });
+    }
+    try {
+      return res.json({ draft: await generateBid(project, await store.getSettings()) });
+    } catch (error) {
+      return res.status(502).json({ error: error.message });
+    }
+  })
+);
 
 module.exports = app;

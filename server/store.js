@@ -173,8 +173,20 @@ async function listWorkers() {
   return workers;
 }
 
+async function getSettings() {
+  const raw = await cmd("GET", "settings");
+  return raw ? JSON.parse(raw) : {};
+}
+
+async function saveSettings(settings) {
+  await cmd("SET", "settings", JSON.stringify(settings));
+  return settings;
+}
+
 module.exports = {
   storageKind,
+  getSettings,
+  saveSettings,
   saveTask,
   getTask,
   createTask,

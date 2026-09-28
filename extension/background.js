@@ -7,13 +7,8 @@ let tickInProgress = false;
 async function readSettings() {
   return chrome.storage.local.get([
     "apiBaseUrl",
-    "profileSummary",
     "workerId",
     "workerToken",
-    "aiProvider",
-    "aiApiKey",
-    "aiModel",
-    "aiBaseUrl",
     "autoSubmit",
     "automationEnabled",
     "workerTabId"
@@ -100,30 +95,28 @@ async function sendToTab(tabId, message) {
   throw lastError;
 }
 
-async function createBidInTab(tabId, settings) {
-  const { project } = await sendToTab(tabId, { type: "EXTRACT_PROJECT" });
-
-  const { draft, source, warning } = await apiFetch(settings, "/api/draft-bid", {
-    method: "POST",
-    body: JSON.stringify({
-      project,
-      profileSummary: settings.profileSummary || "",
-      aiConfig: {
-        provider: settings.aiProvider || "",
-        apiKey: settings.aiApiKey || "",
-        model: settings.aiModel || "",
-        baseUrl: settings.aiBaseUrl || ""
-      }
-    })
-  });
-
+async function fillBidInTab(tabId, settings, draft) {
   const { submitClicked } = await sendToTab(tabId, {
     type: "FILL_BID",
     draft,
     autoSubmit: Boolean(settings.autoSubmit)
   });
+  return submitClicked;
+}
 
-  return { project, draft, source, warning, submitClicked };
+async function createBidInTab(tabId, settings, serverDraft) {
+  if (serverDraft) {
+    const submitClicked = await fillBidInTab(tabId, settings, serverDraft);
+    return { draft: serverDraft, draftSource: "server", submitClicked };
+  }
+
+  const { project } = await sendToTab(tabId, { type: "EXTRACT_PROJECT" });
+  const { draft } = await apiFetch(settings, "/api/draft-bid", {
+    method: "POST",
+    body: JSON.stringify({ project })
+  });
+  const submitClicked = await fillBidInTab(tabId, settings, draft);
+  return { project, draft, draftSource: "page", submitClicked };
 }
 
 async function reportTaskResult(settings, payload) {
@@ -150,15 +143,14 @@ async function processTask(settings, task) {
 
   try {
     const tab = await navigateWorkerTab(task.url);
-    const result = await createBidInTab(tab.id, settings);
+    const result = await createBidInTab(tab.id, settings, task.draft);
     await reportTaskResult(settings, {
       ...base,
       status: "success",
       details: {
         pageUrl: task.url,
         submitClicked: result.submitClicked,
-        draftSource: result.source,
-        warning: result.warning || null
+        draftSource: result.draftSource
       }
     });
   } catch (error) {
@@ -170,14 +162,14 @@ async function processTask(settings, task) {
   }
 }
 
-async function processAutomationTick() {
+async function processAutomationTick({ force = false } = {}) {
   if (tickInProgress) {
     return;
   }
   tickInProgress = true;
   try {
     const settings = await readSettings();
-    if (!settings.automationEnabled) {
+    if (!settings.automationEnabled && !force) {
       return;
     }
     if (!settings.workerId) {
@@ -256,7 +248,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return respondWith(disableAutomation(), sendResponse);
   }
   if (message?.type === "AUTOMATION_RUN_NOW") {
-    return respondWith(processAutomationTick(), sendResponse);
+    return respondWith(processAutomationTick({ force: true }), sendResponse);
   }
   return false;
 });
