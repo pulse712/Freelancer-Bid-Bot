@@ -51,6 +51,19 @@
       </section>
 
       <section>
+        <h2>Legal details (NDA / IP)</h2>
+        <p class="hint">Used when a project asks you to sign a Non-Disclosure or IP agreement before bidding.</p>
+        <label for="signerName">Full legal name</label>
+        <input id="signerName" type="text" placeholder="As it should appear on the contract" />
+        <label for="signerAddress">Address</label>
+        <textarea id="signerAddress" rows="3" placeholder="Street, city, country"></textarea>
+        <label class="check-row">
+          <input id="signAgreements" type="checkbox" checked />
+          Sign NDA and IP agreements automatically
+        </label>
+      </section>
+
+      <section>
         <h2>AI</h2>
         <label for="aiProvider">Provider</label>
         <select id="aiProvider">

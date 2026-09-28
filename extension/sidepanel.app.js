@@ -7,6 +7,8 @@ const AUTO_OFF_TEXT = "Auto mode is off.";
 const TEXT_FIELDS = {
   workerName: "workerName",
   workerId: "workerId",
+  signerName: "signerName",
+  signerAddress: "signerAddress",
   apiBaseUrl: "apiBaseUrl",
   workerToken: "workerToken",
   aiProvider: "aiProvider",
@@ -15,7 +17,7 @@ const TEXT_FIELDS = {
   bidPrompt: "bidPrompt",
   typingSpeed: "typingSpeed"
 };
-const CHECKBOXES = { autoSubmit: "autoSubmit", sealedBid: "sealedBid", humanTyping: "humanTyping" };
+const CHECKBOXES = { autoSubmit: "autoSubmit", sealedBid: "sealedBid", humanTyping: "humanTyping", signAgreements: "signAgreements" };
 
 let loadedModels = [];
 let modelsRequestId = 0;
@@ -228,6 +230,7 @@ async function createBidFromUrl() {
     $("draftOutput").value = result.draft || "";
     const source = result.draftSource === "extension" ? "this panel's API key" : "the server";
     const notes = [];
+    if (result.agreements) notes.push(`Agreements: ${result.agreements}`);
     if (result.sealed && result.sealed !== "skipped") notes.push(`Sealed: ${result.sealed}`);
     if (!result.submitClicked) {
       notes.push(result.submitFound ? `Place Bid button found: ${result.submitTarget}` : "Place Bid button NOT found");

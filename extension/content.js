@@ -359,10 +359,274 @@ async function selectUpgrade(labelPattern) {
   return "checkbox not found near label";
 }
 
-async function fillBid({ draft, autoSubmit, humanTyping, typingSpeed, sealedBid }) {
+// ----- NDA / IP agreements -----
+
+const AGREEMENT_KIND = [
+  { id: "nda", pattern: /non[-\s]?disclosure|\bnda\b/i },
+  { id: "ip", pattern: /\bip (agreement|contract)\b|intellectual property/i }
+];
+
+function agreementKindOf(text) {
+  const match = AGREEMENT_KIND.find((kind) => kind.pattern.test(text));
+  return match ? match.id : null;
+}
+
+function unsignedAgreementLinks() {
+  const links = [...document.querySelectorAll("a, button, [role='button']")].filter((element) => {
+    if (!isVisible(element)) return false;
+    const text = normalizedText(element);
+    if (text.length > 80) return false;
+    return Boolean(agreementKindOf(text));
+  });
+
+  const banners = [...document.querySelectorAll("div, section, aside, p, li")].filter((element) => {
+    const text = normalizedText(element);
+    return /you must sign/i.test(text) && text.length < 500;
+  });
+
+  const fromBanners = [];
+  for (const banner of banners) {
+    const inside = links.filter((link) => banner.contains(link));
+    if (inside.length) {
+      fromBanners.push(...inside);
+    } else {
+      const kind = agreementKindOf(normalizedText(banner));
+      const nearby = links.find((link) => agreementKindOf(normalizedText(link)) === kind);
+      if (nearby) fromBanners.push(nearby);
+    }
+  }
+  const chosen = fromBanners.length ? fromBanners : links;
+  const unique = [];
+  const seen = new Set();
+  for (const link of chosen) {
+    const kind = agreementKindOf(normalizedText(link)) || normalizedText(link);
+    if (seen.has(kind)) continue;
+    seen.add(kind);
+    unique.push(link);
+  }
+  return unique;
+}
+
+function dialogRoots() {
+  return [...document.querySelectorAll("[role='dialog'], [aria-modal='true'], .modal, [class*='Modal'], [class*='modal']")].filter(
+    (element) => isVisible(element) && element.getBoundingClientRect().width > 200
+  );
+}
+
+function fieldScore(element, kind) {
+  const bits = [
+    element.getAttribute("name"),
+    element.getAttribute("id"),
+    element.getAttribute("placeholder"),
+    element.getAttribute("aria-label"),
+    element.getAttribute("autocomplete"),
+    element.closest("label")?.textContent,
+    element.previousElementSibling?.textContent
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+  if (kind === "name") {
+    if (/address|email|phone|city|country|search/.test(bits)) return -1;
+    if (/full.?name|legal.?name|your.?name|signer|print.?name/.test(bits)) return 3;
+    if (/\bname\b/.test(bits)) return 2;
+    return 0;
+  }
+  if (/address|street|city|country|post.?code|zip/.test(bits) && !/email/.test(bits)) return 2;
+  return 0;
+}
+
+function findField(root, kind) {
+  const candidates = [...root.querySelectorAll("input:not([type='hidden']):not([type='checkbox']):not([type='radio']):not([type='submit']), textarea")].filter(
+    (element) => isVisible(element)
+  );
+  let best = null;
+  let bestScore = 0;
+  for (const element of candidates) {
+    const score = fieldScore(element, kind);
+    if (score > bestScore) {
+      best = element;
+      bestScore = score;
+    }
+  }
+  return best;
+}
+
+async function typeIntoField(element, value) {
+  await humanClick(element);
+  setNativeValue(element, "");
+  await wait(randomBetween(80, 180));
+  await typeLikeHuman(element, value, "3");
+  element.dispatchEvent(new Event("change", { bubbles: true }));
+  element.dispatchEvent(new FocusEvent("blur", { bubbles: true }));
+}
+
+function signatureCanvas(root) {
+  return [...root.querySelectorAll("canvas")].find((canvas) => {
+    const rect = canvas.getBoundingClientRect();
+    return isVisible(canvas) && rect.width >= 120 && rect.height >= 40;
+  });
+}
+
+function fireCanvasPointer(canvas, type, x, y, extra = {}) {
+  const rect = canvas.getBoundingClientRect();
+  const clientX = rect.left + x;
+  const clientY = rect.top + y;
+  const init = mouseEventInit(clientX, clientY, extra);
+  canvas.dispatchEvent(new PointerEvent(type.replace("mouse", "pointer"), { ...init, pointerId: 1, pointerType: "mouse", isPrimary: true, pressure: extra.buttons ? 0.5 : 0 }));
+  canvas.dispatchEvent(new MouseEvent(type, init));
+}
+
+// Draw a short handwritten-looking stroke on the signature pad, then leave the typed name in any name box.
+async function drawSignature(canvas, name) {
+  const rect = canvas.getBoundingClientRect();
+  const width = rect.width;
+  const height = rect.height;
+  const start = { x: width * 0.12, y: height * 0.62 };
+  await movePointerTo(canvas);
+  fireCanvasPointer(canvas, "mousedown", start.x, start.y, { buttons: 1 });
+  placePointer(rect.left + start.x, rect.top + start.y);
+
+  const letters = Math.min(12, Math.max(6, (name || "sign").replace(/\s+/g, "").length));
+  let x = start.x;
+  let y = start.y;
+  for (let i = 0; i < letters; i += 1) {
+    x += width * randomBetween(0.04, 0.08);
+    y = start.y + Math.sin(i * 1.1) * height * 0.18 + randomBetween(-4, 4);
+    fireCanvasPointer(canvas, "mousemove", x, Math.max(8, Math.min(height - 8, y)), { buttons: 1 });
+    placePointer(rect.left + x, rect.top + y);
+    await wait(18);
+  }
+  fireCanvasPointer(canvas, "mouseup", x, y);
+  schedulePointerHide();
+}
+
+function findActionButton(root, patterns) {
+  const buttons = [...root.querySelectorAll("button, [role='button'], a, input[type='submit']")].filter(isVisible);
+  for (const pattern of patterns) {
+    const match = buttons.find((button) => pattern.test(normalizedText(button)) && normalizedText(button).length < 40 && !isDisabled(button));
+    if (match) return match;
+  }
+  return null;
+}
+
+async function clickIfPresent(root, patterns) {
+  const button = findActionButton(root, patterns);
+  if (!button) return false;
+  await humanClick(button);
+  await wait(randomBetween(400, 800));
+  return true;
+}
+
+async function fillAgreementForm(root, signerName, signerAddress) {
+  for (const pattern of [/get started/, /start signing/, /i agree to (the )?terms/, /continue/]) {
+    await clickIfPresent(root, [pattern]);
+  }
+
+  const nameField = findField(root, "name");
+  if (nameField && signerName && (nameField.value || "").trim() !== signerName) {
+    await typeIntoField(nameField, signerName);
+  }
+
+  const addressField = findField(root, "address");
+  if (addressField && signerAddress && (addressField.value || "").trim() !== signerAddress) {
+    await typeIntoField(addressField, signerAddress);
+  }
+
+  const typeHere = [...root.querySelectorAll("div, span, button, a, p")].find((element) =>
+    isVisible(element) && /your name goes here|click to (sign|type)/i.test(normalizedText(element))
+  );
+  if (typeHere && signerName) {
+    await humanClick(typeHere);
+    await wait(300);
+    const typed = findField(root, "name") || document.activeElement;
+    if (typed && (typed.tagName === "INPUT" || typed.tagName === "TEXTAREA")) {
+      await typeIntoField(typed, signerName);
+    }
+  }
+
+  const canvas = signatureCanvas(root);
+  if (canvas) {
+    await drawSignature(canvas, signerName);
+    await wait(200);
+  }
+
+  const signed = await clickIfPresent(root, [
+    /^i agree$/,
+    /^agree$/,
+    /^accept$/,
+    /^sign( now)?$/,
+    /^insert signature$/,
+    /^continue$/,
+    /^ok$/,
+    /^done$/,
+    /^submit$/
+  ]);
+  return { filledName: Boolean(nameField), filledAddress: Boolean(addressField), signed, drew: Boolean(canvas) };
+}
+
+async function waitForAgreementUi(timeoutMs = 8000) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const dialogs = dialogRoots();
+    if (dialogs.length) return dialogs[dialogs.length - 1];
+    const canvas = signatureCanvas(document);
+    if (canvas) return canvas.closest("[role='dialog'], .modal, [class*='Modal']") || document.body;
+    if (/your name goes here/i.test(pageText())) return document.body;
+    await wait(300);
+  }
+  return null;
+}
+
+async function closeAgreementUi(root) {
+  const close = findActionButton(root, [/^close$/, /^cancel$/, /^done$/]);
+  if (close && /^close$|^cancel$/.test(normalizedText(close))) {
+    await humanClick(close);
+    await wait(400);
+  }
+}
+
+async function signAgreements({ signerName, signerAddress, enabled }) {
+  if (!enabled) return "skipped";
+  const links = unsignedAgreementLinks();
+  if (!links.length) return "none required";
+  if (!signerName) return "needed: fill Full legal name in the side panel";
+
+  const results = [];
+  for (const link of links) {
+    const kind = agreementKindOf(normalizedText(link)) || normalizedText(link).slice(0, 24);
+    await humanClick(link);
+    const ui = await waitForAgreementUi();
+    if (!ui) {
+      results.push(`${kind}: opened but no form appeared`);
+      continue;
+    }
+    const filled = await fillAgreementForm(ui, signerName, signerAddress);
+    await wait(600);
+    if (dialogRoots().includes(ui) && isVisible(ui)) {
+      await closeAgreementUi(ui);
+    }
+    results.push(
+      `${kind}: ${filled.signed ? "signed" : "filled, confirm on page"}${filled.drew ? ", signature drawn" : ""}${filled.filledAddress ? ", address entered" : ""}`
+    );
+    await wait(500);
+  }
+  return results.join("; ") || "none required";
+}
+
+async function fillBid({ draft, autoSubmit, humanTyping, typingSpeed, sealedBid, signAgreements: shouldSign, signerName, signerAddress }) {
   if (!draft) {
     throw new Error("No draft text to fill.");
   }
+  const agreements = await signAgreements({
+    enabled: shouldSign !== false,
+    signerName: (signerName || "").trim(),
+    signerAddress: (signerAddress || "").trim()
+  });
+  if (agreements.startsWith("needed:")) {
+    throw new Error(agreements);
+  }
+
   const bidInput = await waitForElement(BID_INPUT_SELECTORS);
   if (!bidInput) {
     throw new Error("Could not find bid description field.");
@@ -386,7 +650,7 @@ async function fillBid({ draft, autoSubmit, humanTyping, typingSpeed, sealedBid 
 
   const submitButton = await waitForSubmitButton(bidInput, autoSubmit ? 10000 : 2000);
   if (!autoSubmit) {
-    return { submitClicked: false, submitFound: Boolean(submitButton), submitTarget: describeElement(submitButton), sealed, registered };
+    return { submitClicked: false, submitFound: Boolean(submitButton), submitTarget: describeElement(submitButton), sealed, registered, agreements };
   }
   if (!submitButton) {
     throw new Error("Bid typed, but the Place Bid button was not found on the page.");
@@ -396,7 +660,7 @@ async function fillBid({ draft, autoSubmit, humanTyping, typingSpeed, sealedBid 
   }
   await wait(randomBetween(700, 1800));
   const submit = await pressSubmit(submitButton, bidInput, draft);
-  return { submitClicked: true, submitFound: true, sealed, registered, ...submit };
+  return { submitClicked: true, submitFound: true, sealed, registered, agreements, ...submit };
 }
 
 // ----- making the page's form notice the typed text -----

@@ -11,6 +11,9 @@ async function readSettings() {
     "apiBaseUrl",
     "workerId",
     "workerName",
+    "signerName",
+    "signerAddress",
+    "signAgreements",
     "workerToken",
     "autoSubmit",
     "sealedBid",
@@ -129,6 +132,9 @@ async function fillBidInTab(tabId, settings, draft) {
     draft,
     autoSubmit: Boolean(settings.autoSubmit),
     sealedBid: settings.sealedBid !== false,
+    signAgreements: settings.signAgreements !== false,
+    signerName: settings.signerName || settings.workerName || "",
+    signerAddress: settings.signerAddress || "",
     humanTyping: settings.humanTyping !== false,
     typingSpeed: settings.typingSpeed || "3"
   });
@@ -208,6 +214,7 @@ async function processTask(settings, task) {
         submitTarget: result.submitTarget,
         submitConfirmed: result.submitConfirmed,
         sealed: result.sealed,
+        agreements: result.agreements,
         draftSource: result.draftSource,
         workerName: settings.workerName || ""
       }
