@@ -5,7 +5,7 @@ require("dotenv").config();
 
 const store = require("./store");
 const dashboardHtml = require("./dashboard");
-const { generateBid, testConnection, DEFAULT_PROMPT, DEFAULT_MODELS, PLACEHOLDERS } = require("./ai");
+const { generateBid, testConnection, listModels, DEFAULT_PROMPT, DEFAULT_MODELS, PLACEHOLDERS } = require("./ai");
 const { fetchProject } = require("./freelancer");
 
 const WORKER_TOKEN = process.env.WORKER_TOKEN || "";
@@ -250,28 +250,40 @@ app.put(
   })
 );
 
+async function candidateSettings(body = {}) {
+  const saved = await store.getSettings();
+  const { provider, apiKey, model, baseUrl } = body;
+  const candidate = {
+    provider: provider ?? saved.provider,
+    apiKey: apiKey && String(apiKey).trim(),
+    model: model ?? saved.model,
+    baseUrl: baseUrl ?? saved.baseUrl
+  };
+  if (!candidate.apiKey) {
+    if (saved.apiKey && saved.provider !== candidate.provider) {
+      throw new Error(`The saved key belongs to ${saved.provider}. Enter a ${candidate.provider} API key.`);
+    }
+    candidate.apiKey = saved.apiKey;
+  }
+  return candidate;
+}
+
 app.post(
   "/api/settings/test",
   asyncRoute(async (req, res) => {
-    const saved = await store.getSettings();
-    const { provider, apiKey, model, baseUrl } = req.body || {};
-    const candidate = {
-      provider: provider ?? saved.provider,
-      apiKey: apiKey && String(apiKey).trim(),
-      model: model ?? saved.model,
-      baseUrl: baseUrl ?? saved.baseUrl
-    };
-    if (!candidate.apiKey) {
-      if (saved.apiKey && saved.provider !== candidate.provider) {
-        return res.json({
-          ok: false,
-          error: `The saved key belongs to ${saved.provider}. Enter a ${candidate.provider} API key to test it.`
-        });
-      }
-      candidate.apiKey = saved.apiKey;
-    }
     try {
-      return res.json({ ok: true, ...(await testConnection(candidate)) });
+      return res.json({ ok: true, ...(await testConnection(await candidateSettings(req.body))) });
+    } catch (error) {
+      return res.json({ ok: false, error: error.message });
+    }
+  })
+);
+
+app.post(
+  "/api/settings/models",
+  asyncRoute(async (req, res) => {
+    try {
+      return res.json({ ok: true, models: await listModels(await candidateSettings(req.body)) });
     } catch (error) {
       return res.json({ ok: false, error: error.message });
     }

@@ -177,7 +177,19 @@ function modelsUrlFor(settings) {
   return base.replace(suffix, "/models") + (settings.provider === "claude" ? "?limit=1000" : "");
 }
 
-async function listModels(settings) {
+const NON_CHAT_MODEL = /embed|tts|whisper|dall-e|davinci|babbage|moderation|image|imagen|veo|audio|realtime|transcribe|search|sora|computer-use|codex|instruct|robotics|aqa|live/i;
+
+function toCatalogEntry(item, provider) {
+  const id = String(item.id || item.name || "").replace(/^models\//, "");
+  const label = item.display_name || item.displayName || "";
+  const created = item.created ? item.created * 1000 : item.created_at ? Date.parse(item.created_at) : 0;
+  const methods = item.supportedGenerationMethods;
+  const chat =
+    !NON_CHAT_MODEL.test(id) && (provider !== "gemini" || !methods || methods.includes("generateContent"));
+  return { id, label: label && label !== id ? label : "", created, chat };
+}
+
+async function fetchModelCatalog(settings) {
   const url = modelsUrlFor(settings);
   if (!url) {
     return null;
@@ -185,13 +197,27 @@ async function listModels(settings) {
   try {
     const payload = await request(url, { headers: authHeaders(settings) }, "Model list", TEST_TIMEOUT_MS);
     const items = payload?.data || payload?.models || [];
-    return items.map((item) => String(item.id || item.name || "").replace(/^models\//, "")).filter(Boolean);
+    return items.map((item) => toCatalogEntry(item, settings.provider)).filter((entry) => entry.id);
   } catch (error) {
     if (error.status === 401 || error.status === 403) {
       throw new Error(`API key rejected by ${settings.provider}. Check that the key is correct and active.`);
     }
-    return null;
+    error.listFailed = true;
+    throw error;
   }
+}
+
+async function listModels(settings) {
+  resolve(settings);
+  const catalog = await fetchModelCatalog(settings);
+  if (!catalog) {
+    throw new Error('This Base URL has no model list. Pick "Custom model" and type the model name.');
+  }
+  return catalog
+    .filter((entry) => entry.chat)
+    .map((entry, index) => ({ ...entry, index }))
+    .sort((a, b) => b.created - a.created || a.index - b.index)
+    .map(({ id, label }) => ({ id, label }));
 }
 
 function modelAvailable(models, model) {
@@ -201,7 +227,12 @@ function modelAvailable(models, model) {
 async function testConnection(settings) {
   const started = Date.now();
   const model = resolve(settings);
-  const models = await listModels(settings);
+  let models = null;
+  try {
+    models = (await fetchModelCatalog(settings))?.map((entry) => entry.id) || null;
+  } catch (error) {
+    if (!error.listFailed) throw error;
+  }
   if (models && models.length && !modelAvailable(models, model)) {
     const examples = models.slice(0, 8).join(", ");
     throw new Error(
@@ -220,4 +251,4 @@ async function testConnection(settings) {
   };
 }
 
-module.exports = { generateBid, testConnection, DEFAULT_PROMPT, DEFAULT_MODELS, PLACEHOLDERS };
+module.exports = { generateBid, testConnection, listModels, DEFAULT_PROMPT, DEFAULT_MODELS, PLACEHOLDERS };

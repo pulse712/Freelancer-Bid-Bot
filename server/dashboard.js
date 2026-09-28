@@ -38,6 +38,9 @@ module.exports = `<!doctype html>
     .outcome-submitted { color: #5fd37a; }
     .outcome-filled { color: #8fb0ff; }
     .outcome-failed { color: #ff6b6b; }
+    .inline { display: flex; gap: 6px; align-items: center; }
+    .inline button { margin: 0; white-space: nowrap; }
+    #modelCustom { margin-top: 6px; }
   </style>
 </head>
 <body>
@@ -101,7 +104,12 @@ module.exports = `<!doctype html>
     </div>
     <div>
       <label for="model">Model</label>
-      <input id="model" placeholder="Leave blank for the provider default" />
+      <div class="inline">
+        <select id="model"></select>
+        <button id="loadModelsBtn" type="button" class="secondary">Load models</button>
+      </div>
+      <input id="modelCustom" placeholder="Type the model name" hidden />
+      <div class="hint" id="modelStatus"></div>
     </div>
     <div>
       <label for="baseUrl">Base URL (optional)</label>
@@ -122,6 +130,9 @@ module.exports = `<!doctype html>
     const $ = (id) => document.getElementById(id);
     const ONLINE_WINDOW_MS = 90 * 1000;
     let defaultModels = {};
+    let savedSettings = {};
+    let loadedModels = [];
+    let modelsRequestId = 0;
 
     $("workerId").value = localStorage.getItem("bidbotWorkerId") || "";
 
@@ -145,21 +156,82 @@ module.exports = `<!doctype html>
     }
 
     function showSettings(settings) {
+      savedSettings = settings;
       defaultModels = settings.defaultModels || {};
       $("provider").value = settings.provider;
-      $("model").value = settings.model;
       $("baseUrl").value = settings.baseUrl;
       $("prompt").value = settings.prompt;
       $("apiKey").value = "";
       $("apiKeyStatus").textContent = settings.apiKeySet ? "Saved key ending " + settings.apiKeyHint : "No key saved";
       $("placeholderHint").textContent =
         "Placeholders filled from the project: " + settings.placeholders.map((name) => "{" + name + "}").join(" ");
-      updateModelPlaceholder();
+      renderModelOptions(settings.model);
+      if (canLoadModels()) loadModels();
     }
 
-    function updateModelPlaceholder() {
+    function addModelOption(value, text) {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = text;
+      $("model").appendChild(option);
+    }
+
+    function renderModelOptions(selected) {
       const fallback = defaultModels[$("provider").value];
-      $("model").placeholder = fallback ? "Default: " + fallback : "Leave blank for the provider default";
+      $("model").textContent = "";
+      addModelOption("", fallback ? "Provider default (" + fallback + ")" : "Provider default");
+      for (const model of loadedModels) {
+        addModelOption(model.id, model.label ? model.label + " - " + model.id : model.id);
+      }
+      const known = !selected || loadedModels.some((model) => model.id === selected);
+      if (!known) addModelOption(selected, selected + " (saved)");
+      addModelOption("__custom__", "Custom model...");
+      $("model").value = selected || "";
+      toggleCustomModel();
+    }
+
+    function toggleCustomModel() {
+      $("modelCustom").hidden = $("model").value !== "__custom__";
+    }
+
+    function modelValue() {
+      return $("model").value === "__custom__" ? $("modelCustom").value.trim() : $("model").value;
+    }
+
+    function canLoadModels() {
+      const provider = $("provider").value;
+      if (!provider) return false;
+      return Boolean($("apiKey").value.trim()) || (savedSettings.apiKeySet && savedSettings.provider === provider);
+    }
+
+    async function loadModels() {
+      const requestId = ++modelsRequestId;
+      const status = $("modelStatus");
+      status.className = "hint";
+      status.textContent = "Loading models...";
+      $("loadModelsBtn").disabled = true;
+      const current = modelValue();
+      try {
+        const result = await api("/api/settings/models", {
+          method: "POST",
+          body: JSON.stringify({ provider: $("provider").value, apiKey: $("apiKey").value, baseUrl: $("baseUrl").value })
+        });
+        if (requestId !== modelsRequestId) return;
+        loadedModels = result.ok ? result.models : [];
+        renderModelOptions(current);
+        if (result.ok) {
+          status.textContent = loadedModels.length + " models available for this key.";
+        } else {
+          status.className = "hint outcome-failed";
+          status.textContent = "Could not load models: " + result.error;
+        }
+      } catch (error) {
+        if (requestId !== modelsRequestId) return;
+        status.className = "hint outcome-failed";
+        status.textContent = "Could not load models: " + error.message;
+      } finally {
+        if (requestId === modelsRequestId) $("loadModelsBtn").disabled = false;
+      }
     }
 
     async function loadSettings() {
@@ -177,7 +249,7 @@ module.exports = `<!doctype html>
           body: JSON.stringify({
             provider: $("provider").value,
             apiKey: $("apiKey").value,
-            model: $("model").value,
+            model: modelValue(),
             baseUrl: $("baseUrl").value,
             prompt: $("prompt").value,
             ...extra
@@ -344,7 +416,17 @@ module.exports = `<!doctype html>
       }
     }
 
-    $("provider").addEventListener("change", updateModelPlaceholder);
+    $("provider").addEventListener("change", () => {
+      loadedModels = [];
+      $("modelStatus").textContent = "";
+      renderModelOptions("");
+      if (canLoadModels()) loadModels();
+    });
+    $("apiKey").addEventListener("change", () => {
+      if (canLoadModels()) loadModels();
+    });
+    $("model").addEventListener("change", toggleCustomModel);
+    $("loadModelsBtn").addEventListener("click", loadModels);
     $("saveSettingsBtn").addEventListener("click", () => saveSettings());
     $("clearKeyBtn").addEventListener("click", () => saveSettings({ apiKey: "", clearApiKey: true }));
 
@@ -359,7 +441,7 @@ module.exports = `<!doctype html>
           body: JSON.stringify({
             provider: $("provider").value,
             apiKey: $("apiKey").value,
-            model: $("model").value,
+            model: modelValue(),
             baseUrl: $("baseUrl").value
           })
         });

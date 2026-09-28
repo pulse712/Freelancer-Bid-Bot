@@ -63,6 +63,8 @@ Open `http://localhost:8787/`. Without Upstash variables the server uses in-memo
 | --- | --- | --- |
 | `GET /api/settings` | none | AI settings and prompt (the API key is never returned, only whether one is saved) |
 | `PUT /api/settings` | none | Save `{ provider, apiKey, model, baseUrl, prompt }`; omit `apiKey` to keep the saved one |
+| `POST /api/settings/test` | none | Check `{ provider, apiKey, model, baseUrl }`: key accepted, model available, and one test reply |
+| `POST /api/settings/models` | none | List the chat models the key can use, newest first |
 | `POST /api/tasks` | none | `{ workerId, url }` or `{ workerId, urls: [] }`: fetch projects, write bids, queue |
 | `GET /api/tasks` | none | Recent tasks with their bids |
 | `POST /api/tasks/:id/retry` | none | Write the bid again and re-queue a finished or failed task |
