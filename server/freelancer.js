@@ -1,4 +1,5 @@
 const PROJECTS_API = "https://www.freelancer.com/api/projects/0.1/projects/";
+const FETCH_TIMEOUT_MS = 15000;
 
 function seoUrlFromProjectUrl(url) {
   const match = new URL(url).pathname.match(/^\/projects\/(.+?)\/?$/);
@@ -27,7 +28,16 @@ async function fetchProject(url) {
     full_description: "true",
     job_details: "true"
   });
-  const response = await fetch(`${PROJECTS_API}?${query}`, { headers: { Accept: "application/json" } });
+  let response;
+  try {
+    response = await fetch(`${PROJECTS_API}?${query}`, {
+      headers: { Accept: "application/json" },
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS)
+    });
+  } catch (error) {
+    const timedOut = error.name === "TimeoutError" || error.name === "AbortError";
+    throw new Error(timedOut ? `Freelancer API did not answer within ${FETCH_TIMEOUT_MS / 1000} s` : `Freelancer API unreachable: ${error.message}`);
+  }
   if (!response.ok) {
     throw new Error(`Freelancer API returned ${response.status}`);
   }

@@ -166,7 +166,7 @@ module.exports = `<!doctype html>
       $("placeholderHint").textContent =
         "Placeholders filled from the project: " + settings.placeholders.map((name) => "{" + name + "}").join(" ");
       renderModelOptions(settings.model);
-      if (canLoadModels()) loadModels();
+      loadModelsIfPossible();
     }
 
     function addModelOption(value, text) {
@@ -184,7 +184,7 @@ module.exports = `<!doctype html>
         addModelOption(model.id, model.label ? model.label + " - " + model.id : model.id);
       }
       const known = !selected || loadedModels.some((model) => model.id === selected);
-      if (!known) addModelOption(selected, selected + " (saved)");
+      if (!known) addModelOption(selected, selected + (selected === savedSettings.model ? " (saved)" : " (current)"));
       addModelOption("__custom__", "Custom model...");
       $("model").value = selected || "";
       toggleCustomModel();
@@ -198,10 +198,29 @@ module.exports = `<!doctype html>
       return $("model").value === "__custom__" ? $("modelCustom").value.trim() : $("model").value;
     }
 
+    function customModelMissing(messageEl) {
+      if ($("model").value !== "__custom__" || $("modelCustom").value.trim()) return false;
+      messageEl.className = "message outcome-failed";
+      messageEl.textContent = "Type the custom model name, or pick a model from the list.";
+      $("modelCustom").focus();
+      return true;
+    }
+
     function canLoadModels() {
       const provider = $("provider").value;
       if (!provider) return false;
       return Boolean($("apiKey").value.trim()) || (savedSettings.apiKeySet && savedSettings.provider === provider);
+    }
+
+    function loadModelsIfPossible() {
+      if (canLoadModels()) {
+        loadModels();
+      } else {
+        $("modelStatus").className = "hint";
+        $("modelStatus").textContent = $("provider").value
+          ? "Paste an API key to load the model list."
+          : "Select a provider first.";
+      }
     }
 
     async function loadModels() {
@@ -243,6 +262,8 @@ module.exports = `<!doctype html>
     }
 
     async function saveSettings(extra = {}) {
+      if (!extra.clearApiKey && customModelMissing($("settingsMessage"))) return;
+      $("settingsMessage").className = "message";
       try {
         const payload = await api("/api/settings", {
           method: "PUT",
@@ -418,13 +439,10 @@ module.exports = `<!doctype html>
 
     $("provider").addEventListener("change", () => {
       loadedModels = [];
-      $("modelStatus").textContent = "";
       renderModelOptions("");
-      if (canLoadModels()) loadModels();
+      loadModelsIfPossible();
     });
-    $("apiKey").addEventListener("change", () => {
-      if (canLoadModels()) loadModels();
-    });
+    $("apiKey").addEventListener("change", loadModelsIfPossible);
     $("model").addEventListener("change", toggleCustomModel);
     $("loadModelsBtn").addEventListener("click", loadModels);
     $("saveSettingsBtn").addEventListener("click", () => saveSettings());
@@ -432,6 +450,7 @@ module.exports = `<!doctype html>
 
     $("testKeyBtn").addEventListener("click", async () => {
       const message = $("testMessage");
+      if (customModelMissing(message)) return;
       $("testKeyBtn").disabled = true;
       message.className = "message";
       message.textContent = "Testing API key...";

@@ -259,6 +259,9 @@ async function candidateSettings(body = {}) {
     model: model ?? saved.model,
     baseUrl: baseUrl ?? saved.baseUrl
   };
+  if (!candidate.provider) {
+    throw new Error("No AI provider selected in Settings");
+  }
   if (!candidate.apiKey) {
     if (saved.apiKey && saved.provider !== candidate.provider) {
       throw new Error(`The saved key belongs to ${saved.provider}. Enter a ${candidate.provider} API key.`);

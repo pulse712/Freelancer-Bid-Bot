@@ -108,7 +108,7 @@ async function callClaude(prompt, settings, model, timeoutMs) {
     {
       method: "POST",
       headers: { "Content-Type": "application/json", ...authHeaders(settings) },
-      body: JSON.stringify({ model, max_tokens: 800, messages: [{ role: "user", content: prompt }] })
+      body: JSON.stringify({ model, max_tokens: 2000, messages: [{ role: "user", content: prompt }] })
     },
     "Claude API",
     timeoutMs
