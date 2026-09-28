@@ -53,12 +53,50 @@ for (const element of [apiBaseUrlEl, workerIdEl, workerTokenEl]) {
 }
 autoSubmitEl.addEventListener("change", saveSettings);
 
-document.getElementById("createBidFromUrlBtn").addEventListener("click", async () => {
-  const url = manualProjectUrlEl.value.trim();
+function readManualUrl() {
+  let url = manualProjectUrlEl.value.trim();
   if (!url) {
     setStatus("Enter a Freelancer URL first.");
-    return;
+    return null;
   }
+  if (!/^https?:\/\//i.test(url)) {
+    url = `https://${url}`;
+    manualProjectUrlEl.value = url;
+  }
+  if (!/^https?:\/\/(www\.)?freelancer\.com\/.+/i.test(url)) {
+    setStatus("That is not a freelancer.com link.");
+    return null;
+  }
+  return url;
+}
+
+async function openManualUrl() {
+  const url = readManualUrl();
+  if (!url) return;
+  const button = document.getElementById("openUrlBtn");
+  button.disabled = true;
+  try {
+    setStatus("Opening project page...");
+    await sendToBackground("MANUAL_OPEN_URL", { url });
+    setStatus("Project page opened in the worker tab.");
+  } catch (error) {
+    setStatus(`Could not open the page: ${error.message}`);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+document.getElementById("openUrlBtn").addEventListener("click", openManualUrl);
+manualProjectUrlEl.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    openManualUrl();
+  }
+});
+
+document.getElementById("createBidFromUrlBtn").addEventListener("click", async () => {
+  const url = readManualUrl();
+  if (!url) return;
   try {
     await saveSettings();
     setStatus("Opening project and requesting bid from server...");

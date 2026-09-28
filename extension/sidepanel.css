@@ -44,6 +44,15 @@ button {
   cursor: pointer;
 }
 
+button.secondary {
+  background: #2f3244;
+}
+
+.hint {
+  font-size: 11px;
+  color: #8a8ea8;
+}
+
 button:disabled {
   background: #555;
   cursor: not-allowed;

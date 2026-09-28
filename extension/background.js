@@ -241,6 +241,18 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     );
   }
 
+  if (message?.type === "MANUAL_OPEN_URL") {
+    const url = (message.url || "").trim();
+    if (!isFreelancerUrl(url)) {
+      sendResponse({ ok: false, error: "Invalid Freelancer URL." });
+      return false;
+    }
+    return respondWith(
+      navigateWorkerTab(url).then((tab) => ({ tabId: tab.id, url: tab.url })),
+      sendResponse
+    );
+  }
+
   if (message?.type === "AUTOMATION_START") {
     return respondWith(enableAutomation(), sendResponse);
   }
