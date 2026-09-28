@@ -3,6 +3,9 @@ module.exports = `<!doctype html>
 <head>
   <meta charset="utf-8" />
   <title>Bid Bot Dashboard</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  <link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48" />
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
   <style>
     body { font-family: Arial, sans-serif; margin: 24px auto; max-width: 1100px; padding: 0 12px; background: #10111a; color: #e8ebff; }
     h1 { font-size: 20px; }

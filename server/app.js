@@ -1,3 +1,4 @@
+const path = require("path");
 const express = require("express");
 const cors = require("cors");
 require("dotenv").config();
@@ -83,6 +84,19 @@ function publicSettings(settings) {
     defaultModels: DEFAULT_MODELS,
     placeholders: PLACEHOLDERS
   };
+}
+
+const STATIC_ICONS = {
+  "/favicon.svg": "favicon.svg",
+  "/favicon.ico": "favicon.ico",
+  "/apple-touch-icon.png": "apple-touch-icon.png"
+};
+
+for (const [route, file] of Object.entries(STATIC_ICONS)) {
+  app.get(route, (_req, res) => {
+    res.set("Cache-Control", "public, max-age=86400");
+    res.sendFile(path.join(__dirname, file));
+  });
 }
 
 app.get("/", (_req, res) => {
