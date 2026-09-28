@@ -4,7 +4,7 @@ require("dotenv").config();
 
 const store = require("./store");
 const dashboardHtml = require("./dashboard");
-const { generateBid, DEFAULT_PROMPT, DEFAULT_MODELS, PLACEHOLDERS } = require("./ai");
+const { generateBid, testConnection, DEFAULT_PROMPT, DEFAULT_MODELS, PLACEHOLDERS } = require("./ai");
 const { fetchProject } = require("./freelancer");
 
 const WORKER_TOKEN = process.env.WORKER_TOKEN || "";
@@ -233,6 +233,25 @@ app.put(
     }
     await store.saveSettings(next);
     return res.json({ ok: true, settings: publicSettings(next) });
+  })
+);
+
+app.post(
+  "/api/settings/test",
+  asyncRoute(async (req, res) => {
+    const saved = await store.getSettings();
+    const { provider, apiKey, model, baseUrl } = req.body || {};
+    const candidate = {
+      provider: provider ?? saved.provider,
+      apiKey: (apiKey && String(apiKey).trim()) || saved.apiKey,
+      model: model ?? saved.model,
+      baseUrl: baseUrl ?? saved.baseUrl
+    };
+    try {
+      return res.json({ ok: true, ...(await testConnection(candidate)) });
+    } catch (error) {
+      return res.json({ ok: false, error: error.message });
+    }
   })
 );
 

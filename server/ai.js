@@ -29,10 +29,19 @@ function renderPrompt(template, project) {
   return (template || DEFAULT_PROMPT).replace(pattern, (_match, key) => values[key] || "");
 }
 
+const STATUS_HINTS = {
+  400: "request rejected; check the model name and base URL",
+  401: "API key rejected",
+  403: "API key has no access to this model or endpoint",
+  404: "model or endpoint not found",
+  429: "rate limit hit or quota/credits used up"
+};
+
 async function readJson(response, label) {
   if (!response.ok) {
     const body = await response.text().catch(() => "");
-    throw new Error(`${label} returned ${response.status}: ${body.slice(0, 200)}`);
+    const hint = STATUS_HINTS[response.status];
+    throw new Error(`${label} returned ${response.status}${hint ? ` (${hint})` : ""}: ${body.slice(0, 200)}`);
   }
   return response.json();
 }
@@ -92,7 +101,7 @@ const PROVIDERS = {
   gemini: callGemini
 };
 
-async function generateBid(project, settings) {
+async function complete(prompt, settings) {
   const call = PROVIDERS[settings.provider];
   if (!call) {
     throw new Error("No AI provider selected in Settings");
@@ -101,11 +110,24 @@ async function generateBid(project, settings) {
     throw new Error("No AI API key saved in Settings");
   }
   const model = settings.model || DEFAULT_MODELS[settings.provider];
-  const draft = await call(renderPrompt(settings.prompt, project), settings, model);
-  if (!draft) {
-    throw new Error("AI provider returned an empty bid");
-  }
-  return draft;
+  return { text: await call(prompt, settings, model), model };
 }
 
-module.exports = { generateBid, DEFAULT_PROMPT, DEFAULT_MODELS, PLACEHOLDERS };
+async function generateBid(project, settings) {
+  const { text } = await complete(renderPrompt(settings.prompt, project), settings);
+  if (!text) {
+    throw new Error("AI provider returned an empty bid");
+  }
+  return text;
+}
+
+async function testConnection(settings) {
+  const started = Date.now();
+  const { text, model } = await complete("Reply with the single word OK.", settings);
+  if (!text) {
+    throw new Error("Provider answered but returned no text");
+  }
+  return { model, reply: text.slice(0, 100), latencyMs: Date.now() - started };
+}
+
+module.exports = { generateBid, testConnection, DEFAULT_PROMPT, DEFAULT_MODELS, PLACEHOLDERS };

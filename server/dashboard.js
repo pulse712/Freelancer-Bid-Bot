@@ -109,8 +109,10 @@ module.exports = `<!doctype html>
   <textarea id="prompt" rows="12"></textarea>
   <div class="hint" id="placeholderHint"></div>
   <button id="saveSettingsBtn" type="button">Save settings</button>
+  <button id="testKeyBtn" type="button" class="secondary">Test API key</button>
   <button id="clearKeyBtn" type="button" class="secondary">Remove API key</button>
   <p class="message" id="settingsMessage"></p>
+  <p class="message" id="testMessage"></p>
   </section>
 
   <script>
@@ -342,6 +344,37 @@ module.exports = `<!doctype html>
     $("provider").addEventListener("change", updateModelPlaceholder);
     $("saveSettingsBtn").addEventListener("click", () => saveSettings());
     $("clearKeyBtn").addEventListener("click", () => saveSettings({ apiKey: "", clearApiKey: true }));
+
+    $("testKeyBtn").addEventListener("click", async () => {
+      const message = $("testMessage");
+      $("testKeyBtn").disabled = true;
+      message.className = "message";
+      message.textContent = "Testing API key...";
+      try {
+        const result = await api("/api/settings/test", {
+          method: "POST",
+          body: JSON.stringify({
+            provider: $("provider").value,
+            apiKey: $("apiKey").value,
+            model: $("model").value,
+            baseUrl: $("baseUrl").value
+          })
+        });
+        if (result.ok) {
+          message.className = "message outcome-submitted";
+          message.textContent =
+            "API key works. Model " + result.model + " answered in " + result.latencyMs + " ms: \\"" + result.reply + "\\"";
+        } else {
+          message.className = "message outcome-failed";
+          message.textContent = "API key check failed: " + result.error;
+        }
+      } catch (error) {
+        message.className = "message outcome-failed";
+        message.textContent = "API key check failed: " + error.message;
+      } finally {
+        $("testKeyBtn").disabled = false;
+      }
+    });
 
     $("queueBtn").addEventListener("click", async () => {
       const workerId = $("workerId").value.trim();
