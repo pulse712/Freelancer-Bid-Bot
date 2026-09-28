@@ -27,6 +27,17 @@ const TEST_TIMEOUT_MS = 20000;
 
 const PLACEHOLDERS = ["title", "description", "budget", "skills", "url"];
 
+const SYSTEM_PROMPT =
+  "You write proposals (bids) that a freelancer pastes into the Freelancer.com bid box. " +
+  "Reply with the final proposal text only, exactly as it should appear in the bid box. " +
+  "No introduction, no explanation, no headings, no markdown, no code blocks, no quotes around the text, no closing remarks.";
+
+const PROJECT_BLOCK = `Title: {title}
+Budget: {budget}
+Skills: {skills}
+Description:
+{description}`;
+
 function renderPrompt(template, project) {
   const values = {
     title: project.title,
@@ -36,7 +47,46 @@ function renderPrompt(template, project) {
     url: project.pageUrl
   };
   const pattern = new RegExp(`\\{(${PLACEHOLDERS.join("|")})\\}`, "g");
-  return (template || DEFAULT_PROMPT).replace(pattern, (_match, key) => values[key] || "");
+  let text = template || DEFAULT_PROMPT;
+  if (!pattern.test(text)) {
+    // The prompt has no placeholders, so the AI would never see the project. Append it.
+    text = `${text.trim()}\n\nProject to bid on:\n${PROJECT_BLOCK}`;
+  }
+  return text.replace(pattern, (_match, key) => values[key] || "");
+}
+
+const PREAMBLE = /^(here('s| is| are)\b|sure\b|certainly\b|of course\b|okay\b|below is\b|this (bid|proposal)\b|i('ve| have) (written|drafted)\b|absolutely\b)/i;
+
+// Remove markdown and chatty framing so only the proposal text gets typed into the bid box.
+function cleanBid(raw) {
+  let text = String(raw || "").replace(/\r\n/g, "\n").trim();
+  text = text.replace(/^```[a-z]*\s*$/gim, "").replace(/```/g, "");
+  let lines = text.split("\n").map((line) => line.replace(/\s+$/, ""));
+
+  lines = lines.filter((line) => !/^\s*([-*_]\s*){3,}$/.test(line)); // --- or *** rules
+  lines = lines.filter((line) => !(/^\s{0,3}#{1,6}\s+/.test(line) && line.length < 80)); // headings
+  lines = lines.map((line) => line.replace(/^\s*>\s?/, "")); // quotes
+
+  // Drop an opening remark such as "Here is your bid:" (first paragraph only, if short).
+  const firstBlank = lines.findIndex((line) => !line.trim());
+  const firstParagraph = lines.slice(0, firstBlank === -1 ? lines.length : firstBlank).join(" ");
+  if (firstBlank !== -1 && firstParagraph.length < 200 && PREAMBLE.test(firstParagraph.trim())) {
+    lines = lines.slice(firstBlank + 1);
+  }
+  // Drop a lone label line like "Proposal:" or "Bid:" at the start.
+  while (lines.length && /^\s*(proposal|bid|cover letter)\s*:?\s*$/i.test(lines[0])) {
+    lines.shift();
+  }
+
+  text = lines.join("\n");
+  text = text.replace(/\*\*(.+?)\*\*/g, "$1").replace(/__(.+?)__/g, "$1"); // bold
+  text = text.replace(/(^|[\s(])[*_]([^*_\n]+)[*_](?=[\s).,!?]|$)/g, "$1$2"); // italics
+  text = text.replace(/`([^`\n]+)`/g, "$1"); // inline code
+  text = text.replace(/\n{3,}/g, "\n\n").trim();
+  if ((text.startsWith('"') && text.endsWith('"')) || (text.startsWith("“") && text.endsWith("”"))) {
+    text = text.slice(1, -1).trim();
+  }
+  return text;
 }
 
 const STATUS_HINTS = {
@@ -88,13 +138,16 @@ function authHeaders(settings) {
   return { Authorization: `Bearer ${settings.apiKey}` };
 }
 
-async function callOpenAICompatible(prompt, settings, model, timeoutMs) {
+async function callOpenAICompatible(prompt, settings, model, timeoutMs, system) {
   const payload = await request(
     endpointFor(settings, model),
     {
       method: "POST",
       headers: { "Content-Type": "application/json", ...authHeaders(settings) },
-      body: JSON.stringify({ model, messages: [{ role: "user", content: prompt }] })
+      body: JSON.stringify({
+        model,
+        messages: [...(system ? [{ role: "system", content: system }] : []), { role: "user", content: prompt }]
+      })
     },
     "OpenAI-compatible API",
     timeoutMs
@@ -102,13 +155,18 @@ async function callOpenAICompatible(prompt, settings, model, timeoutMs) {
   return payload?.choices?.[0]?.message?.content?.trim();
 }
 
-async function callClaude(prompt, settings, model, timeoutMs) {
+async function callClaude(prompt, settings, model, timeoutMs, system) {
   const payload = await request(
     endpointFor(settings, model),
     {
       method: "POST",
       headers: { "Content-Type": "application/json", ...authHeaders(settings) },
-      body: JSON.stringify({ model, max_tokens: 2000, messages: [{ role: "user", content: prompt }] })
+      body: JSON.stringify({
+        model,
+        max_tokens: 2000,
+        ...(system ? { system } : {}),
+        messages: [{ role: "user", content: prompt }]
+      })
     },
     "Claude API",
     timeoutMs
@@ -116,13 +174,16 @@ async function callClaude(prompt, settings, model, timeoutMs) {
   return payload?.content?.find((item) => item.type === "text")?.text?.trim();
 }
 
-async function callGemini(prompt, settings, model, timeoutMs) {
+async function callGemini(prompt, settings, model, timeoutMs, system) {
   const payload = await request(
     endpointFor(settings, model),
     {
       method: "POST",
       headers: { "Content-Type": "application/json", ...authHeaders(settings) },
-      body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
+      body: JSON.stringify({
+        ...(system ? { systemInstruction: { parts: [{ text: system }] } } : {}),
+        contents: [{ parts: [{ text: prompt }] }]
+      })
     },
     "Gemini API",
     timeoutMs
@@ -152,17 +213,18 @@ function resolve(settings) {
   return settings.model || DEFAULT_MODELS[settings.provider];
 }
 
-async function complete(prompt, settings, timeoutMs = GENERATE_TIMEOUT_MS) {
+async function complete(prompt, settings, timeoutMs = GENERATE_TIMEOUT_MS, system = null) {
   const model = resolve(settings);
-  return { text: await PROVIDERS[settings.provider](prompt, settings, model, timeoutMs), model };
+  return { text: await PROVIDERS[settings.provider](prompt, settings, model, timeoutMs, system), model };
 }
 
 async function generateBid(project, settings) {
-  const { text } = await complete(renderPrompt(settings.prompt, project), settings);
-  if (!text) {
+  const { text } = await complete(renderPrompt(settings.prompt, project), settings, GENERATE_TIMEOUT_MS, SYSTEM_PROMPT);
+  const bid = cleanBid(text);
+  if (!bid) {
     throw new Error("AI provider returned an empty bid");
   }
-  return text;
+  return bid;
 }
 
 function modelsUrlFor(settings) {
@@ -251,4 +313,4 @@ async function testConnection(settings) {
   };
 }
 
-module.exports = { generateBid, testConnection, listModels, DEFAULT_PROMPT, DEFAULT_MODELS, PLACEHOLDERS };
+module.exports = { generateBid, testConnection, listModels, cleanBid, DEFAULT_PROMPT, DEFAULT_MODELS, PLACEHOLDERS };
