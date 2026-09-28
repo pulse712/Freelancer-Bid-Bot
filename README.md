@@ -33,7 +33,7 @@ Put your own background (experience, portfolio links, tone) directly in the prom
 
 ```bash
 npm install
-cp .env.example .env   # set WORKER_TOKEN
+cp .env.example .env   # set DASHBOARD_PASSWORD and WORKER_TOKEN
 npm run dev
 ```
 
@@ -43,9 +43,16 @@ Open `http://localhost:8787/`. Without Upstash variables the server uses in-memo
 
 1. Import the repo as a Vercel project with the default root directory (`extension/` is excluded by `.vercelignore`).
 2. Add the Upstash Redis integration from the Vercel Marketplace. It sets the storage env variables automatically.
-3. Set `WORKER_TOKEN` in the project env settings.
-4. Deploy and check `https://<your-app>.vercel.app/health` – it should show `"storage": "redis"`.
-5. Open the dashboard and fill in Settings.
+3. Set `DASHBOARD_PASSWORD` and `WORKER_TOKEN` in the project env settings.
+4. Deploy and check `https://<your-app>.vercel.app/health` – it should show `"storage": "redis"` and `"passwordEnabled": true`.
+5. Open the dashboard, log in, and fill in Settings.
+
+## Dashboard login
+
+- `DASHBOARD_PASSWORD` protects the dashboard page and every `/api/*` route except the worker routes, which use `WORKER_TOKEN`.
+- Logging in sets a signed, HttpOnly cookie valid for 30 days. Changing the password logs every browser out.
+- Wrong passwords are limited to 10 tries per 10 minutes per IP address.
+- If `DASHBOARD_PASSWORD` is empty the dashboard is open and shows a warning banner.
 
 ## Install the extension (per Octo profile / VPS browser)
 
@@ -59,24 +66,27 @@ Open `http://localhost:8787/`. Without Upstash variables the server uses in-memo
 
 ## API
 
-| Endpoint | Auth header | Purpose |
+| Endpoint | Auth | Purpose |
 | --- | --- | --- |
-| `GET /api/settings` | none | AI settings and prompt (the API key is never returned, only whether one is saved) |
-| `PUT /api/settings` | none | Save `{ provider, apiKey, model, baseUrl, prompt }`; omit `apiKey` to keep the saved one |
-| `POST /api/settings/test` | none | Check `{ provider, apiKey, model, baseUrl }`: key accepted, model available, and one test reply |
-| `POST /api/settings/models` | none | List the chat models the key can use, newest first |
-| `POST /api/tasks` | none | `{ workerId, url }` or `{ workerId, urls: [] }`: fetch projects, write bids, queue |
-| `GET /api/tasks` | none | Recent tasks with their bids |
-| `POST /api/tasks/:id/retry` | none | Write the bid again and re-queue a finished or failed task |
-| `GET /api/workers` | none | Workers and last check-in time |
-| `GET /api/results` | none | Recent results |
+| `POST /api/login` | none | `{ password }` sets the session cookie |
+| `POST /api/logout` | none | Clears the session cookie |
+| `GET /api/session` | none | `{ passwordEnabled, loggedIn }` |
+| `GET /api/settings` | session cookie | AI settings and prompt (the API key is never returned, only whether one is saved) |
+| `PUT /api/settings` | session cookie | Save `{ provider, apiKey, model, baseUrl, prompt }`; omit `apiKey` to keep the saved one |
+| `POST /api/settings/test` | session cookie | Check `{ provider, apiKey, model, baseUrl }`: key accepted, model available, and one test reply |
+| `POST /api/settings/models` | session cookie | List the chat models the key can use, newest first |
+| `POST /api/tasks` | session cookie | `{ workerId, url }` or `{ workerId, urls: [] }`: fetch projects, write bids, queue |
+| `GET /api/tasks` | session cookie | Recent tasks with their bids |
+| `POST /api/tasks/:id/retry` | session cookie | Write the bid again and re-queue a finished or failed task |
+| `GET /api/workers` | session cookie | Workers and last check-in time |
+| `GET /api/results` | session cookie | Recent results |
 | `GET /api/worker/next-task?workerId=` | `x-worker-token` | Claim the next task |
 | `POST /api/worker/task-result` | `x-worker-token` | Report `success` / `fail` |
 | `POST /api/draft-bid` | `x-worker-token` | Write a bid for page-extracted project data (fallback) |
 
 ## Known limits
 
-- The dashboard has no login. Anyone with the server URL can change settings and spend your AI credits, so keep the URL private.
+- Without `DASHBOARD_PASSWORD` the dashboard is open. Anyone with the server URL could then change settings and spend your AI credits.
 - `success` means the submit button was clicked. The extension does not yet check whether Freelancer accepted the bid.
 - The extension's page selectors (bid box, submit button) are best guesses and need checking against the live bid form.
 - Only the proposal text is filled. Bid amount and delivery time are left as Freelancer pre-fills them.

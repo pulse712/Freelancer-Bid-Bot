@@ -4,7 +4,9 @@ const cors = require("cors");
 require("dotenv").config();
 
 const store = require("./store");
+const auth = require("./auth");
 const dashboardHtml = require("./dashboard");
+const loginHtml = require("./login");
 const { generateBid, testConnection, listModels, DEFAULT_PROMPT, DEFAULT_MODELS, PLACEHOLDERS } = require("./ai");
 const { fetchProject } = require("./freelancer");
 
@@ -99,12 +101,56 @@ for (const [route, file] of Object.entries(STATIC_ICONS)) {
   });
 }
 
-app.get("/", (_req, res) => {
-  res.type("html").send(dashboardHtml);
+app.get("/health", (_req, res) => {
+  res.json({ ok: true, service: "bid-bot-backend", storage: store.storageKind, passwordEnabled: auth.passwordEnabled });
 });
 
-app.get("/health", (_req, res) => {
-  res.json({ ok: true, service: "bid-bot-backend", storage: store.storageKind });
+app.get("/login", (req, res) => {
+  if (auth.isLoggedIn(req)) {
+    return res.redirect("/");
+  }
+  return res.type("html").send(loginHtml);
+});
+
+app.post("/api/login", (req, res) => {
+  if (!auth.passwordEnabled) {
+    return res.json({ ok: true });
+  }
+  if (auth.tooManyAttempts(req)) {
+    return res.status(429).json({ error: "Too many attempts. Wait 10 minutes and try again." });
+  }
+  if (!auth.checkPassword(req.body?.password)) {
+    return res.status(401).json({ error: "Wrong password" });
+  }
+  auth.clearAttempts(req);
+  auth.login(req, res);
+  return res.json({ ok: true });
+});
+
+app.post("/api/logout", (req, res) => {
+  auth.logout(req, res);
+  return res.json({ ok: true });
+});
+
+app.get("/api/session", (req, res) => {
+  res.json({ passwordEnabled: auth.passwordEnabled, loggedIn: auth.isLoggedIn(req) });
+});
+
+// Everything below needs a dashboard login, except worker routes (guarded by the worker token).
+const WORKER_ROUTES = [/^\/api\/worker\//, /^\/api\/draft-bid$/];
+
+app.use((req, res, next) => {
+  if (auth.isLoggedIn(req) || WORKER_ROUTES.some((pattern) => pattern.test(req.path))) {
+    return next();
+  }
+  if (req.path.startsWith("/api/")) {
+    return res.status(401).json({ error: "Login required" });
+  }
+  return res.redirect("/login");
+});
+
+app.get("/", (_req, res) => {
+  res.type("html").send(dashboardHtml);
 });
 
 app.post(

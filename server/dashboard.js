@@ -38,6 +38,9 @@ module.exports = `<!doctype html>
     .outcome-submitted { color: #5fd37a; }
     .outcome-filled { color: #8fb0ff; }
     .outcome-failed { color: #ff6b6b; }
+    nav button.logout { margin-left: 18px; border-bottom: 0; color: #8a8ea8; }
+    .banner { background: #3a2a12; border: 1px solid #8a5a1a; color: #ffc857; border-radius: 8px; padding: 10px 12px; font-size: 12px; margin: 8px 0 4px; }
+    .banner code { color: #fff; }
     .inline { display: flex; gap: 6px; align-items: center; }
     .inline button { margin: 0; white-space: nowrap; }
     #modelCustom { margin-top: 6px; }
@@ -49,8 +52,13 @@ module.exports = `<!doctype html>
     <nav>
       <button type="button" data-tab="dashboard">Dashboard</button>
       <button type="button" data-tab="settings">Settings</button>
+      <button type="button" id="logoutBtn" class="logout" hidden>Log out</button>
     </nav>
   </header>
+  <div class="banner" id="authWarning" hidden>
+    This dashboard has no password. Anyone with the URL can queue bids and read your AI key.
+    Set a <code>DASHBOARD_PASSWORD</code> environment variable in Vercel (or .env) and redeploy to require a login.
+  </div>
 
   <section id="tab-dashboard" class="tab">
   <div class="stats" id="stats"></div>
@@ -138,9 +146,23 @@ module.exports = `<!doctype html>
 
     async function api(path, options = {}) {
       const response = await fetch(path, { ...options, headers: { "Content-Type": "application/json" } });
-      const payload = await response.json();
+      if (response.status === 401) {
+        location.replace("/login");
+        throw new Error("Login required");
+      }
+      const payload = await response.json().catch(() => ({ error: "Server returned an unreadable response (" + response.status + ")" }));
       if (!response.ok) throw new Error(payload.error || response.status);
       return payload;
+    }
+
+    async function loadSession() {
+      try {
+        const session = await api("/api/session");
+        $("logoutBtn").hidden = !session.passwordEnabled;
+        $("authWarning").hidden = session.passwordEnabled;
+      } catch (_error) {
+        // Not critical; the page still works without session info.
+      }
     }
 
     function cell(row, text, className) {
@@ -506,7 +528,13 @@ module.exports = `<!doctype html>
     });
     window.addEventListener("hashchange", () => showTab(location.hash.slice(1)));
 
+    $("logoutBtn").addEventListener("click", async () => {
+      await api("/api/logout", { method: "POST" }).catch(() => {});
+      location.replace("/login");
+    });
+
     showTab(location.hash.slice(1));
+    loadSession();
     loadSettings();
     refresh();
     setInterval(refresh, 10000);
