@@ -361,6 +361,7 @@ async function selectUpgrade(labelPattern) {
 
 // ----- NDA / IP agreements -----
 
+const IS_TOP = window === window.top;
 const AGREEMENT_KIND = [
   { id: "nda", pattern: /non[-\s]?disclosure|\bnda\b/i },
   { id: "ip", pattern: /\bip (agreement|contract)\b|intellectual property/i }
@@ -371,31 +372,71 @@ function agreementKindOf(text) {
   return match ? match.id : null;
 }
 
+function queryDeep(root, selector) {
+  const found = [];
+  const visit = (node) => {
+    if (!node || !node.querySelectorAll) return;
+    try {
+      found.push(...node.querySelectorAll(selector));
+    } catch (_error) {
+      return;
+    }
+    for (const element of node.querySelectorAll("*")) {
+      if (element.shadowRoot) visit(element.shadowRoot);
+    }
+  };
+  visit(root);
+  return found;
+}
+
+function sameOriginFrames(win = window) {
+  const docs = [];
+  const walk = (w) => {
+    try {
+      docs.push(w.document);
+      for (const frame of w.frames) walk(frame);
+    } catch (_error) {
+      // Cross-origin; the all_frames content script handles that document.
+    }
+  };
+  walk(win);
+  return docs;
+}
+
+function visibleDeep(selector) {
+  return sameOriginFrames().flatMap((doc) => queryDeep(doc, selector)).filter(isVisible);
+}
+
 function unsignedAgreementLinks() {
-  const links = [...document.querySelectorAll("a, button, [role='button']")].filter((element) => {
-    if (!isVisible(element)) return false;
+  const clickables = visibleDeep("a, button, [role='button'], [role='link']").filter((element) => {
     const text = normalizedText(element);
-    if (text.length > 80) return false;
-    return Boolean(agreementKindOf(text));
+    return text.length > 0 && text.length < 80 && Boolean(agreementKindOf(text));
   });
 
-  const banners = [...document.querySelectorAll("div, section, aside, p, li")].filter((element) => {
-    const text = normalizedText(element);
-    return /you must sign/i.test(text) && text.length < 500;
-  });
+  const banners = [];
+  for (const doc of sameOriginFrames()) {
+    const candidates = queryDeep(
+      doc,
+      "a, button, p, div, span, section, aside, li, h2, h3, [class*='alert'], [class*='banner'], [class*='notice'], [class*='warning']"
+    );
+    for (const element of candidates) {
+      if (!isVisible(element)) continue;
+      const text = normalizedText(element);
+      if (/you must sign/i.test(text) && text.length < 800) banners.push(element);
+    }
+  }
 
   const fromBanners = [];
   for (const banner of banners) {
-    const inside = links.filter((link) => banner.contains(link));
-    if (inside.length) {
-      fromBanners.push(...inside);
-    } else {
+    const inside = clickables.filter((link) => banner.contains(link));
+    if (inside.length) fromBanners.push(...inside);
+    else {
       const kind = agreementKindOf(normalizedText(banner));
-      const nearby = links.find((link) => agreementKindOf(normalizedText(link)) === kind);
+      const nearby = clickables.find((link) => agreementKindOf(normalizedText(link)) === kind);
       if (nearby) fromBanners.push(nearby);
     }
   }
-  const chosen = fromBanners.length ? fromBanners : links;
+  const chosen = fromBanners.length ? fromBanners : clickables;
   const unique = [];
   const seen = new Set();
   for (const link of chosen) {
@@ -408,9 +449,44 @@ function unsignedAgreementLinks() {
 }
 
 function dialogRoots() {
-  return [...document.querySelectorAll("[role='dialog'], [aria-modal='true'], .modal, [class*='Modal'], [class*='modal']")].filter(
-    (element) => isVisible(element) && element.getBoundingClientRect().width > 200
+  return visibleDeep("[role='dialog'], [aria-modal='true'], .modal, [class*='Modal'], [class*='modal'], [class*='overlay'], [class*='Overlay']").filter(
+    (element) => element.getBoundingClientRect().width > 180
   );
+}
+
+function signerIframes() {
+  return visibleDeep("iframe").filter((frame) => {
+    const src = `${frame.src || ""} ${frame.getAttribute("name") || ""}`.toLowerCase();
+    const rect = frame.getBoundingClientRect();
+    return (
+      rect.width > 200 &&
+      rect.height > 120 &&
+      /hellosign|dropbox|sign|hs-embed|embedded/i.test(src)
+    );
+  });
+}
+
+function isYellowish(element) {
+  const style = getComputedStyle(element);
+  const color = `${style.backgroundColor} ${style.borderColor}`;
+  const match = color.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
+  if (!match) return false;
+  const [, r, g, b] = match.map(Number);
+  return r > 180 && g > 160 && b < 140 && r - b > 40;
+}
+
+function signatureTargets(root = document) {
+  const nodes = queryDeep(root, "canvas, input, textarea, [contenteditable='true'], button, a, div, span, p, label, td, [class*='sign'], [class*='Sign']");
+  return nodes.filter((element) => {
+    if (!isVisible(element)) return false;
+    const rect = element.getBoundingClientRect();
+    if (rect.width < 60 || rect.height < 18) return false;
+    const text = normalizedText(element);
+    if (/your name goes here|click to (sign|type)|click here to sign|type your name|sign here/i.test(text)) return true;
+    if (element.tagName === "CANVAS" && rect.width >= 100 && rect.height >= 36) return true;
+    if (isYellowish(element) && rect.width >= 100 && rect.height >= 28 && rect.height < 220 && text.length < 80) return true;
+    return false;
+  });
 }
 
 function fieldScore(element, kind) {
@@ -420,26 +496,30 @@ function fieldScore(element, kind) {
     element.getAttribute("placeholder"),
     element.getAttribute("aria-label"),
     element.getAttribute("autocomplete"),
+    element.getAttribute("data-qa"),
     element.closest("label")?.textContent,
-    element.previousElementSibling?.textContent
+    element.previousElementSibling?.textContent,
+    element.parentElement?.innerText?.slice(0, 80)
   ]
     .filter(Boolean)
     .join(" ")
     .toLowerCase();
   if (kind === "name") {
-    if (/address|email|phone|city|country|search/.test(bits)) return -1;
-    if (/full.?name|legal.?name|your.?name|signer|print.?name/.test(bits)) return 3;
+    if (/address|email|phone|city|country|search|company/.test(bits)) return -1;
+    if (/full.?name|legal.?name|your.?name|signer|print.?name|typed name/i.test(bits)) return 4;
     if (/\bname\b/.test(bits)) return 2;
     return 0;
   }
-  if (/address|street|city|country|post.?code|zip/.test(bits) && !/email/.test(bits)) return 2;
+  if (/email/.test(bits)) return -1;
+  if (/address|street|city|country|post.?code|zip/.test(bits)) return 3;
   return 0;
 }
 
 function findField(root, kind) {
-  const candidates = [...root.querySelectorAll("input:not([type='hidden']):not([type='checkbox']):not([type='radio']):not([type='submit']), textarea")].filter(
-    (element) => isVisible(element)
-  );
+  const candidates = queryDeep(
+    root,
+    "input:not([type='hidden']):not([type='checkbox']):not([type='radio']):not([type='submit']):not([type='button']), textarea, [contenteditable='true']"
+  ).filter(isVisible);
   let best = null;
   let bestScore = 0;
   for (const element of candidates) {
@@ -462,9 +542,9 @@ async function typeIntoField(element, value) {
 }
 
 function signatureCanvas(root) {
-  return [...root.querySelectorAll("canvas")].find((canvas) => {
+  return queryDeep(root, "canvas").find((canvas) => {
     const rect = canvas.getBoundingClientRect();
-    return isVisible(canvas) && rect.width >= 120 && rect.height >= 40;
+    return isVisible(canvas) && rect.width >= 100 && rect.height >= 36;
   });
 }
 
@@ -473,11 +553,18 @@ function fireCanvasPointer(canvas, type, x, y, extra = {}) {
   const clientX = rect.left + x;
   const clientY = rect.top + y;
   const init = mouseEventInit(clientX, clientY, extra);
-  canvas.dispatchEvent(new PointerEvent(type.replace("mouse", "pointer"), { ...init, pointerId: 1, pointerType: "mouse", isPrimary: true, pressure: extra.buttons ? 0.5 : 0 }));
+  canvas.dispatchEvent(
+    new PointerEvent(type.replace("mouse", "pointer"), {
+      ...init,
+      pointerId: 1,
+      pointerType: "mouse",
+      isPrimary: true,
+      pressure: extra.buttons ? 0.5 : 0
+    })
+  );
   canvas.dispatchEvent(new MouseEvent(type, init));
 }
 
-// Draw a short handwritten-looking stroke on the signature pad, then leave the typed name in any name box.
 async function drawSignature(canvas, name) {
   const rect = canvas.getBoundingClientRect();
   const width = rect.width;
@@ -502,9 +589,11 @@ async function drawSignature(canvas, name) {
 }
 
 function findActionButton(root, patterns) {
-  const buttons = [...root.querySelectorAll("button, [role='button'], a, input[type='submit']")].filter(isVisible);
+  const buttons = queryDeep(root, "button, [role='button'], a, input[type='submit'], input[type='button']").filter(isVisible);
   for (const pattern of patterns) {
-    const match = buttons.find((button) => pattern.test(normalizedText(button)) && normalizedText(button).length < 40 && !isDisabled(button));
+    const match = buttons.find(
+      (button) => pattern.test(normalizedText(button)) && normalizedText(button).length < 48 && !isDisabled(button)
+    );
     if (match) return match;
   }
   return null;
@@ -514,105 +603,257 @@ async function clickIfPresent(root, patterns) {
   const button = findActionButton(root, patterns);
   if (!button) return false;
   await humanClick(button);
+  button.click();
   await wait(randomBetween(400, 800));
   return true;
 }
 
+const START_PATTERNS = [/get started/, /start signing/, /review (and|&) sign/, /i agree to (the )?terms/, /continue to sign/];
+const CONFIRM_PATTERNS = [
+  /^i agree$/,
+  /^agree$/,
+  /^accept$/,
+  /^sign( now)?$/,
+  /^continue$/,
+  /^ok$/,
+  /^done$/,
+  /^submit$/,
+  /^finish$/
+];
+const INSERT_PATTERNS = [/^insert$/, /^insert signature$/, /^type$/, /^save$/, /^use signature$/];
+
+function looksLikeSignerUi(root = document) {
+  if (signatureTargets(root).length) return true;
+  if (signatureCanvas(root)) return true;
+  if (findField(root, "name") || findField(root, "address")) return true;
+  const text = (root.innerText || "").slice(0, 8000);
+  return /your name goes here|click to sign|please sign|type your name/i.test(text);
+}
+
 async function fillAgreementForm(root, signerName, signerAddress) {
-  for (const pattern of [/get started/, /start signing/, /i agree to (the )?terms/, /continue/]) {
+  for (const pattern of START_PATTERNS) {
     await clickIfPresent(root, [pattern]);
   }
 
+  let filledName = false;
+  let filledAddress = false;
+  let drew = false;
+
   const nameField = findField(root, "name");
-  if (nameField && signerName && (nameField.value || "").trim() !== signerName) {
+  if (nameField && signerName && (nameField.value || nameField.textContent || "").trim() !== signerName) {
     await typeIntoField(nameField, signerName);
+    filledName = true;
   }
 
   const addressField = findField(root, "address");
-  if (addressField && signerAddress && (addressField.value || "").trim() !== signerAddress) {
+  if (addressField && signerAddress && (addressField.value || addressField.textContent || "").trim() !== signerAddress) {
     await typeIntoField(addressField, signerAddress);
+    filledAddress = true;
   }
 
-  const typeHere = [...root.querySelectorAll("div, span, button, a, p")].find((element) =>
-    isVisible(element) && /your name goes here|click to (sign|type)/i.test(normalizedText(element))
-  );
-  if (typeHere && signerName) {
-    await humanClick(typeHere);
-    await wait(300);
-    const typed = findField(root, "name") || document.activeElement;
-    if (typed && (typed.tagName === "INPUT" || typed.tagName === "TEXTAREA")) {
-      await typeIntoField(typed, signerName);
+  const boxes = signatureTargets(root);
+  for (const box of boxes) {
+    const label = normalizedText(box);
+    await humanClick(box);
+    await wait(500);
+    const active = document.activeElement;
+    const wantsAddress = /address|street|city/i.test(label) && signerAddress;
+    const value = wantsAddress ? signerAddress : signerName;
+    if (value && active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.isContentEditable)) {
+      await typeIntoField(active, value);
+      if (wantsAddress) filledAddress = true;
+      else filledName = true;
+    } else if (value) {
+      const popup = dialogRoots().pop() || root;
+      const field = findField(popup, wantsAddress ? "address" : "name");
+      if (field) {
+        await typeIntoField(field, value);
+        if (wantsAddress) filledAddress = true;
+        else filledName = true;
+      }
+    }
+    await clickIfPresent(root, INSERT_PATTERNS);
+    const canvas = signatureCanvas(root);
+    if (canvas && signerName) {
+      await drawSignature(canvas, signerName);
+      drew = true;
     }
   }
 
   const canvas = signatureCanvas(root);
-  if (canvas) {
+  if (canvas && signerName && !drew) {
     await drawSignature(canvas, signerName);
-    await wait(200);
+    drew = true;
   }
 
-  const signed = await clickIfPresent(root, [
-    /^i agree$/,
-    /^agree$/,
-    /^accept$/,
-    /^sign( now)?$/,
-    /^insert signature$/,
-    /^continue$/,
-    /^ok$/,
-    /^done$/,
-    /^submit$/
-  ]);
-  return { filledName: Boolean(nameField), filledAddress: Boolean(addressField), signed, drew: Boolean(canvas) };
+  const signed = await clickIfPresent(root, CONFIRM_PATTERNS);
+  return { filledName, filledAddress, signed, drew };
 }
 
-async function waitForAgreementUi(timeoutMs = 8000) {
+function nearestSignerRoot(element) {
+  let node = element;
+  while (node && node !== document.body) {
+    const style = getComputedStyle(node);
+    const cls = `${node.className || ""} ${node.id || ""}`;
+    if (
+      node.getAttribute("role") === "dialog" ||
+      node.getAttribute("aria-modal") === "true" ||
+      /modal|overlay|hello.?sign|sign-widget/i.test(cls) ||
+      (style.position === "fixed" && node.getBoundingClientRect().width > 200 && node.getBoundingClientRect().height > 120)
+    ) {
+      return node;
+    }
+    node = node.parentElement;
+  }
+  return document.body;
+}
+
+async function waitForAgreementUi(timeoutMs = 15000) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
+    if (signerIframes().length) return { kind: "iframe", node: signerIframes()[0] };
     const dialogs = dialogRoots();
-    if (dialogs.length) return dialogs[dialogs.length - 1];
-    const canvas = signatureCanvas(document);
-    if (canvas) return canvas.closest("[role='dialog'], .modal, [class*='Modal']") || document.body;
-    if (/your name goes here/i.test(pageText())) return document.body;
-    await wait(300);
+    if (dialogs.length) {
+      const withUi = dialogs.reverse().find((dialog) => looksLikeSignerUi(dialog)) || dialogs[dialogs.length - 1];
+      return { kind: "dialog", node: withUi };
+    }
+    if (looksLikeSignerUi(document)) {
+      const box = signatureTargets(document)[0];
+      return { kind: "page", node: box ? nearestSignerRoot(box) : document.body };
+    }
+    const stored = await chrome.storage.local.get(["agreementFrameResult"]);
+    if (stored.agreementFrameResult && Date.now() - stored.agreementFrameResult.at < 20000) {
+      return { kind: "frame-done", node: null, result: stored.agreementFrameResult };
+    }
+    await wait(350);
   }
   return null;
 }
 
 async function closeAgreementUi(root) {
-  const close = findActionButton(root, [/^close$/, /^cancel$/, /^done$/]);
-  if (close && /^close$|^cancel$/.test(normalizedText(close))) {
+  if (!root || root === document.body) return;
+  const close = findActionButton(root, [/^close$/, /^cancel$/]);
+  if (close) {
     await humanClick(close);
     await wait(400);
   }
 }
 
+async function setPendingSigner(payload) {
+  await chrome.storage.local.set({
+    pendingAgreementSign: { ...payload, at: Date.now() },
+    agreementFrameResult: null
+  });
+}
+
+async function clearPendingSigner() {
+  await chrome.storage.local.set({ pendingAgreementSign: null });
+}
+
+async function waitForFrameSigner(timeoutMs = 20000) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const { agreementFrameResult } = await chrome.storage.local.get(["agreementFrameResult"]);
+    if (agreementFrameResult && Date.now() - agreementFrameResult.at < 25000) {
+      return agreementFrameResult;
+    }
+    if (!unsignedAgreementLinks().length && !signerIframes().length && !dialogRoots().length) {
+      return { ok: true, note: "banners gone" };
+    }
+    await wait(400);
+  }
+  return null;
+}
+
+function describeFill(kind, filled) {
+  if (!filled) return `${kind}: opened but no form appeared`;
+  return `${kind}: ${filled.signed ? "signed" : "filled, confirm on page"}${filled.drew ? ", signature drawn" : ""}${
+    filled.filledAddress ? ", address entered" : filled.filledName ? ", name entered" : ""
+  }`;
+}
+
 async function signAgreements({ signerName, signerAddress, enabled }) {
   if (!enabled) return "skipped";
   const links = unsignedAgreementLinks();
-  if (!links.length) return "none required";
+  if (!links.length) {
+    if (looksLikeSignerUi(document) || signerIframes().length) {
+      await setPendingSigner({ signerName, signerAddress });
+      const filled = looksLikeSignerUi(document) ? await fillAgreementForm(document, signerName, signerAddress) : null;
+      const frame = await waitForFrameSigner(18000);
+      await clearPendingSigner();
+      if (filled?.signed || filled?.filledName) return describeFill("agreement", filled);
+      if (frame) return `agreement: ${frame.note || "signed in embedded window"}`;
+    }
+    return "none required";
+  }
   if (!signerName) return "needed: fill Full legal name in the side panel";
 
   const results = [];
   for (const link of links) {
     const kind = agreementKindOf(normalizedText(link)) || normalizedText(link).slice(0, 24);
+    await setPendingSigner({ signerName, signerAddress, kind });
     await humanClick(link);
     const ui = await waitForAgreementUi();
     if (!ui) {
       results.push(`${kind}: opened but no form appeared`);
       continue;
     }
-    const filled = await fillAgreementForm(ui, signerName, signerAddress);
-    await wait(600);
-    if (dialogRoots().includes(ui) && isVisible(ui)) {
-      await closeAgreementUi(ui);
+    let filled = null;
+    if (ui.kind === "iframe" || ui.kind === "frame-done") {
+      const frame = ui.result || (await waitForFrameSigner(18000));
+      results.push(frame ? `${kind}: ${frame.note || "signed in embedded window"}` : `${kind}: sign window opened, waiting for fields`);
+    } else {
+      filled = await fillAgreementForm(ui.node, signerName, signerAddress);
+      await wait(600);
+      if (dialogRoots().includes(ui.node) && isVisible(ui.node) && !filled.signed) {
+        await closeAgreementUi(ui.node);
+      }
+      results.push(describeFill(kind, filled));
     }
-    results.push(
-      `${kind}: ${filled.signed ? "signed" : "filled, confirm on page"}${filled.drew ? ", signature drawn" : ""}${filled.filledAddress ? ", address entered" : ""}`
-    );
     await wait(500);
   }
+  await clearPendingSigner();
   return results.join("; ") || "none required";
 }
+
+async function fillEmbeddedAgreement(signerName, signerAddress) {
+  const start = Date.now();
+  while (Date.now() - start < 8000 && !looksLikeSignerUi(document)) {
+    await clickIfPresent(document, START_PATTERNS);
+    await wait(400);
+  }
+  if (!looksLikeSignerUi(document)) {
+    return { ok: false, note: "no sign fields in this frame" };
+  }
+  const filled = await fillAgreementForm(document, signerName, signerAddress);
+  const note = describeFill("embedded", filled);
+  await chrome.storage.local.set({ agreementFrameResult: { ok: Boolean(filled.signed || filled.filledName || filled.drew), note, at: Date.now() } });
+  return { ok: true, note, ...filled };
+}
+
+let embedWatching = false;
+let embedBusy = false;
+async function watchEmbeddedSigner() {
+  if (IS_TOP || embedWatching) return;
+  embedWatching = true;
+  setInterval(async () => {
+    if (embedBusy || !looksLikeSignerUi(document)) return;
+    const stored = await chrome.storage.local.get(["pendingAgreementSign", "agreementFrameResult"]);
+    if (stored.agreementFrameResult && Date.now() - stored.agreementFrameResult.at < 20000) return;
+    if (!stored.pendingAgreementSign || Date.now() - stored.pendingAgreementSign.at > 60000) return;
+    embedBusy = true;
+    try {
+      await fillEmbeddedAgreement(stored.pendingAgreementSign.signerName, stored.pendingAgreementSign.signerAddress);
+    } catch (error) {
+      await chrome.storage.local.set({
+        agreementFrameResult: { ok: false, note: error.message, at: Date.now() }
+      });
+    }
+    embedBusy = false;
+  }, 1200);
+}
+
+watchEmbeddedSigner();
 
 async function fillBid({ draft, autoSubmit, humanTyping, typingSpeed, sealedBid, signAgreements: shouldSign, signerName, signerAddress }) {
   if (!draft) {
@@ -824,9 +1065,14 @@ async function pressSubmit(button, bidInput, draft) {
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (!IS_TOP && (message?.type === "EXTRACT_PROJECT" || message?.type === "FILL_BID")) {
+    return false;
+  }
   const handlers = {
     EXTRACT_PROJECT: async () => ({ project: await extractWhenReady() }),
-    FILL_BID: () => fillBid(message)
+    FILL_BID: () => fillBid(message),
+    FILL_AGREEMENT: () =>
+      fillEmbeddedAgreement(message.signerName || "", message.signerAddress || "")
   };
   const handler = handlers[message?.type];
   if (!handler) {

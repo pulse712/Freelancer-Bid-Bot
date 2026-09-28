@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Freelancer Bid Bot",
   "description": "Opens a Freelancer project, writes a tailored bid with your AI key, types it like a human, and submits.",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "icons": {
     "16": "icons/icon16.png",
     "32": "icons/icon32.png",
@@ -38,12 +38,16 @@
   "content_scripts": [
     {
       "matches": [
-        "https://www.freelancer.com/*"
+        "https://www.freelancer.com/*",
+        "https://*.hellosign.com/*",
+        "https://*.dropbox.com/*",
+        "https://*.dropboxsign.com/*",
+        "https://app.hellosign.com/*",
+        "https://embedded.hellosign.com/*"
       ],
-      "js": [
-        "content.js"
-      ],
-      "run_at": "document_idle"
+      "js": ["content.js"],
+      "run_at": "document_idle",
+      "all_frames": true
     }
   ]
 }
