@@ -191,28 +191,37 @@ async function humanClick(element) {
   schedulePointerHide();
 }
 
-// Typing delay ranges in ms per character.
-const TYPING_SPEEDS = {
-  fast: [15, 45],
-  normal: [35, 95],
-  slow: [70, 160]
-};
+// Total typing time for the whole bid, in seconds. Older saved values are mapped to the new ones.
+const TYPING_SECONDS = { 8: 8, 15: 15, 25: 25, fast: 8, normal: 15, slow: 25 };
+const DEFAULT_TYPING_SECONDS = 8;
 
 function randomBetween(min, max) {
   return min + Math.random() * (max - min);
 }
 
-function pauseAfter(char, [min, max]) {
-  let delay = randomBetween(min, max);
-  if (char === "\n") delay += randomBetween(250, 600);
-  else if (/[.!?]/.test(char)) delay += randomBetween(150, 400);
-  else if (/[,;:]/.test(char)) delay += randomBetween(60, 180);
-  else if (Math.random() < 0.015) delay += randomBetween(400, 1200); // occasional "thinking" pause
+// Splits the total time into a base delay per character plus a pool for pauses at punctuation and line breaks,
+// so the whole bid takes about the chosen number of seconds whatever its length.
+function typingPlan(text, seconds) {
+  const totalMs = seconds * 1000;
+  const pauseSpots = (text.match(/[.!?,;:\n]/g) || []).length;
+  const pauseBudget = totalMs * 0.2;
+  return {
+    base: (totalMs - pauseBudget) / Math.max(1, text.length),
+    pause: pauseSpots ? pauseBudget / pauseSpots : 0
+  };
+}
+
+function pauseAfter(char, plan) {
+  let delay = plan.base * randomBetween(0.45, 1.55);
+  if (char === "\n") delay += plan.pause * randomBetween(1.2, 1.8);
+  else if (/[.!?]/.test(char)) delay += plan.pause * randomBetween(0.9, 1.4);
+  else if (/[,;:]/.test(char)) delay += plan.pause * randomBetween(0.4, 0.8);
   return delay;
 }
 
 async function typeLikeHuman(element, text, speed) {
-  const range = TYPING_SPEEDS[speed] || TYPING_SPEEDS.normal;
+  const seconds = TYPING_SECONDS[speed] || DEFAULT_TYPING_SECONDS;
+  const plan = typingPlan(text, seconds);
   element.focus({ preventScroll: true });
   setNativeValue(element, "");
   await wait(randomBetween(300, 800));
@@ -230,7 +239,7 @@ async function typeLikeHuman(element, text, speed) {
       nativeValueSetter(element).call(element, typed);
       element.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: char }));
     }
-    await wait(pauseAfter(char, range));
+    await wait(pauseAfter(char, plan));
 
     // Keep the background worker awake and informed during long bids.
     if (Date.now() - lastProgress > 4000) {
