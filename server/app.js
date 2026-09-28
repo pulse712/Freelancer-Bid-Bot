@@ -257,10 +257,19 @@ app.post(
     const { provider, apiKey, model, baseUrl } = req.body || {};
     const candidate = {
       provider: provider ?? saved.provider,
-      apiKey: (apiKey && String(apiKey).trim()) || saved.apiKey,
+      apiKey: apiKey && String(apiKey).trim(),
       model: model ?? saved.model,
       baseUrl: baseUrl ?? saved.baseUrl
     };
+    if (!candidate.apiKey) {
+      if (saved.apiKey && saved.provider !== candidate.provider) {
+        return res.json({
+          ok: false,
+          error: `The saved key belongs to ${saved.provider}. Enter a ${candidate.provider} API key to test it.`
+        });
+      }
+      candidate.apiKey = saved.apiKey;
+    }
     try {
       return res.json({ ok: true, ...(await testConnection(candidate)) });
     } catch (error) {

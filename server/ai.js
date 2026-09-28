@@ -9,11 +9,21 @@ Description:
 {description}`;
 
 const DEFAULT_MODELS = {
-  openai: "gpt-4o-mini",
-  cursor: "gpt-4o-mini",
-  claude: "claude-3-5-sonnet-latest",
-  gemini: "gemini-1.5-pro"
+  openai: "gpt-5-mini",
+  cursor: "gpt-5-mini",
+  claude: "claude-sonnet-5",
+  gemini: "gemini-3.8-flash"
 };
+
+const DEFAULT_URLS = {
+  openai: "https://api.openai.com/v1/chat/completions",
+  cursor: "https://api.openai.com/v1/chat/completions",
+  claude: "https://api.anthropic.com/v1/messages",
+  gemini: "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+};
+
+const GENERATE_TIMEOUT_MS = 45000;
+const TEST_TIMEOUT_MS = 20000;
 
 const PLACEHOLDERS = ["title", "description", "budget", "skills", "url"];
 
@@ -37,61 +47,92 @@ const STATUS_HINTS = {
   429: "rate limit hit or quota/credits used up"
 };
 
-async function readJson(response, label) {
+class ProviderError extends Error {
+  constructor(message, status) {
+    super(message);
+    this.status = status;
+  }
+}
+
+async function request(url, options, label, timeoutMs) {
+  let response;
+  try {
+    response = await fetch(url, { ...options, signal: AbortSignal.timeout(timeoutMs) });
+  } catch (error) {
+    if (error.name === "TimeoutError" || error.name === "AbortError") {
+      throw new ProviderError(`${label} did not answer within ${Math.round(timeoutMs / 1000)} s`);
+    }
+    throw new ProviderError(`${label} could not be reached: ${error.cause?.message || error.message}`);
+  }
   if (!response.ok) {
     const body = await response.text().catch(() => "");
-    const hint = STATUS_HINTS[response.status];
-    throw new Error(`${label} returned ${response.status}${hint ? ` (${hint})` : ""}: ${body.slice(0, 200)}`);
+    const invalidKey = response.status === 400 && /API_KEY_INVALID|API key not valid/i.test(body);
+    const status = invalidKey ? 401 : response.status;
+    const hint = STATUS_HINTS[status];
+    throw new ProviderError(`${label} returned ${response.status}${hint ? ` (${hint})` : ""}: ${body.slice(0, 200)}`, status);
   }
   return response.json();
 }
 
-async function callOpenAICompatible(prompt, settings, model) {
-  const response = await fetch(settings.baseUrl || "https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${settings.apiKey}`
+function endpointFor(settings, model) {
+  return (settings.baseUrl || DEFAULT_URLS[settings.provider]).replace("{model}", encodeURIComponent(model));
+}
+
+function authHeaders(settings) {
+  if (settings.provider === "claude") {
+    return { "x-api-key": settings.apiKey, "anthropic-version": "2023-06-01" };
+  }
+  if (settings.provider === "gemini") {
+    return { "x-goog-api-key": settings.apiKey };
+  }
+  return { Authorization: `Bearer ${settings.apiKey}` };
+}
+
+async function callOpenAICompatible(prompt, settings, model, timeoutMs) {
+  const payload = await request(
+    endpointFor(settings, model),
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders(settings) },
+      body: JSON.stringify({ model, messages: [{ role: "user", content: prompt }] })
     },
-    body: JSON.stringify({
-      model,
-      temperature: 0.5,
-      messages: [{ role: "user", content: prompt }]
-    })
-  });
-  const payload = await readJson(response, "OpenAI-compatible API");
+    "OpenAI-compatible API",
+    timeoutMs
+  );
   return payload?.choices?.[0]?.message?.content?.trim();
 }
 
-async function callClaude(prompt, settings, model) {
-  const response = await fetch(settings.baseUrl || "https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-api-key": settings.apiKey,
-      "anthropic-version": "2023-06-01"
+async function callClaude(prompt, settings, model, timeoutMs) {
+  const payload = await request(
+    endpointFor(settings, model),
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders(settings) },
+      body: JSON.stringify({ model, max_tokens: 800, messages: [{ role: "user", content: prompt }] })
     },
-    body: JSON.stringify({
-      model,
-      max_tokens: 800,
-      messages: [{ role: "user", content: prompt }]
-    })
-  });
-  const payload = await readJson(response, "Claude API");
+    "Claude API",
+    timeoutMs
+  );
   return payload?.content?.find((item) => item.type === "text")?.text?.trim();
 }
 
-async function callGemini(prompt, settings, model) {
-  const endpoint =
-    settings.baseUrl ||
-    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(settings.apiKey)}`;
-  const response = await fetch(endpoint, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
-  });
-  const payload = await readJson(response, "Gemini API");
-  return payload?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+async function callGemini(prompt, settings, model, timeoutMs) {
+  const payload = await request(
+    endpointFor(settings, model),
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders(settings) },
+      body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
+    },
+    "Gemini API",
+    timeoutMs
+  );
+  const parts = payload?.candidates?.[0]?.content?.parts || [];
+  return parts
+    .filter((part) => part.text && !part.thought)
+    .map((part) => part.text)
+    .join("")
+    .trim();
 }
 
 const PROVIDERS = {
@@ -101,16 +142,19 @@ const PROVIDERS = {
   gemini: callGemini
 };
 
-async function complete(prompt, settings) {
-  const call = PROVIDERS[settings.provider];
-  if (!call) {
+function resolve(settings) {
+  if (!PROVIDERS[settings.provider]) {
     throw new Error("No AI provider selected in Settings");
   }
   if (!settings.apiKey) {
     throw new Error("No AI API key saved in Settings");
   }
-  const model = settings.model || DEFAULT_MODELS[settings.provider];
-  return { text: await call(prompt, settings, model), model };
+  return settings.model || DEFAULT_MODELS[settings.provider];
+}
+
+async function complete(prompt, settings, timeoutMs = GENERATE_TIMEOUT_MS) {
+  const model = resolve(settings);
+  return { text: await PROVIDERS[settings.provider](prompt, settings, model, timeoutMs), model };
 }
 
 async function generateBid(project, settings) {
@@ -121,13 +165,59 @@ async function generateBid(project, settings) {
   return text;
 }
 
+function modelsUrlFor(settings) {
+  if (settings.provider === "gemini") {
+    return settings.baseUrl ? null : "https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000";
+  }
+  const base = settings.baseUrl || DEFAULT_URLS[settings.provider];
+  const suffix = settings.provider === "claude" ? /\/messages\/?$/ : /\/chat\/completions\/?$/;
+  if (!suffix.test(base)) {
+    return null;
+  }
+  return base.replace(suffix, "/models") + (settings.provider === "claude" ? "?limit=1000" : "");
+}
+
+async function listModels(settings) {
+  const url = modelsUrlFor(settings);
+  if (!url) {
+    return null;
+  }
+  try {
+    const payload = await request(url, { headers: authHeaders(settings) }, "Model list", TEST_TIMEOUT_MS);
+    const items = payload?.data || payload?.models || [];
+    return items.map((item) => String(item.id || item.name || "").replace(/^models\//, "")).filter(Boolean);
+  } catch (error) {
+    if (error.status === 401 || error.status === 403) {
+      throw new Error(`API key rejected by ${settings.provider}. Check that the key is correct and active.`);
+    }
+    return null;
+  }
+}
+
+function modelAvailable(models, model) {
+  return models.some((id) => id === model || id.startsWith(`${model}-`));
+}
+
 async function testConnection(settings) {
   const started = Date.now();
-  const { text, model } = await complete("Reply with the single word OK.", settings);
-  if (!text) {
-    throw new Error("Provider answered but returned no text");
+  const model = resolve(settings);
+  const models = await listModels(settings);
+  if (models && models.length && !modelAvailable(models, model)) {
+    const examples = models.slice(0, 8).join(", ");
+    throw new Error(
+      `The API key works, but model "${model}" is not available to it. Set a different model in Settings. Available models include: ${examples}`
+    );
   }
-  return { model, reply: text.slice(0, 100), latencyMs: Date.now() - started };
+  const { text } = await complete("Reply with the single word OK.", settings, TEST_TIMEOUT_MS);
+  if (!text) {
+    throw new Error(`The API key works, but model "${model}" returned no text`);
+  }
+  return {
+    model,
+    reply: text.slice(0, 100),
+    latencyMs: Date.now() - started,
+    keyChecked: Boolean(models)
+  };
 }
 
 module.exports = { generateBid, testConnection, DEFAULT_PROMPT, DEFAULT_MODELS, PLACEHOLDERS };
