@@ -9,10 +9,14 @@ const BUDGET_SELECTORS = [
 ];
 const BID_INPUT_SELECTORS = [
   "textarea[name='description']",
+  "textarea[id*='proposal']",
   "textarea[id*='description']",
-  "textarea",
-  "[contenteditable='true']"
+  "textarea[placeholder*='proposal' i]",
+  "textarea[aria-label*='proposal' i]"
 ];
+
+const NOT_BID_CONTEXT = /clarification board|ask a question|view \d+ more questions|no spam, self-promotion|post a (question|comment)/i;
+const BID_CONTEXT = /describe your proposal|proposal \(minimum|write (your )?bid|bid description|cover letter|minimum \d+ characters/i;
 const SUBMIT_SELECTORS = [
   "[data-testid='submit-bid']",
   ".BidForm button",
@@ -855,6 +859,82 @@ async function watchEmbeddedSigner() {
 
 watchEmbeddedSigner();
 
+function fieldContext(element) {
+  const bits = [
+    element.getAttribute("name"),
+    element.id,
+    element.getAttribute("placeholder"),
+    element.getAttribute("aria-label"),
+    element.getAttribute("data-testid")
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+  let nearby = bits;
+  let node = element;
+  for (let i = 0; i < 5 && node && node !== document.body; i += 1, node = node.parentElement) {
+    const tag = node.tagName || "";
+    if (/^H[1-6]$/.test(tag) || tag === "LABEL" || tag === "LEGEND") nearby += " " + normalizedText(node);
+    let sibling = node.previousElementSibling;
+    while (sibling) {
+      if (/^H[1-6]$/.test(sibling.tagName) || sibling.tagName === "LABEL" || sibling.tagName === "LEGEND") {
+        nearby += " " + normalizedText(sibling).slice(0, 180);
+        break;
+      }
+      sibling = sibling.previousElementSibling;
+    }
+  }
+  return nearby.replace(/\s+/g, " ");
+}
+
+function findBidInput() {
+  const listed = [];
+  for (const selector of BID_INPUT_SELECTORS) {
+    try {
+      listed.push(...document.querySelectorAll(selector));
+    } catch (_error) {
+      // invalid selector in older engines
+    }
+  }
+  const extra = typeof queryDeep === "function" ? queryDeep(document, "textarea, [contenteditable='true']") : [];
+  const fields = [...new Set([...listed, ...extra])].filter((element) => {
+    if (!element || !element.isConnected) return false;
+    const style = getComputedStyle(element);
+    return style.display !== "none" && style.visibility !== "hidden";
+  });
+  let best = null;
+  let bestScore = -Infinity;
+  for (const element of fields) {
+    const ctx = fieldContext(element);
+    let score = 0;
+    if (NOT_BID_CONTEXT.test(ctx)) score -= 80;
+    if (/\b(question|comment|message|chat)\b/.test(ctx) && !BID_CONTEXT.test(ctx)) score -= 25;
+    if (BID_CONTEXT.test(ctx)) score += 50;
+    if (/\b(proposal|bid description|write my bid)\b/.test(ctx)) score += 20;
+    const form = element.closest("form") || element.parentElement;
+    const formText = normalizedText(form || element).slice(0, 800);
+    if (/\bplace bid\b/.test(formText)) score += 25;
+    if (/\bcancel\b/.test(formText) && /\bpost\b/.test(formText) && !/\bplace bid\b/.test(formText)) score -= 40;
+    if (element.matches("textarea[name='description'], textarea[id*='proposal'], textarea[id*='description']")) score += 10;
+    if (score > bestScore) {
+      best = element;
+      bestScore = score;
+    }
+  }
+  if (best && !NOT_BID_CONTEXT.test(fieldContext(best))) return best;
+  return fields.find((element) => !NOT_BID_CONTEXT.test(fieldContext(element))) || null;
+}
+
+async function waitForBidInput(timeoutMs = 15000) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const field = findBidInput();
+    if (field) return field;
+    await wait(300);
+  }
+  return null;
+}
+
 async function fillBid({ draft, autoSubmit, humanTyping, typingSpeed, sealedBid, signAgreements: shouldSign, signerName, signerAddress }) {
   if (!draft) {
     throw new Error("No draft text to fill.");
@@ -868,9 +948,9 @@ async function fillBid({ draft, autoSubmit, humanTyping, typingSpeed, sealedBid,
     throw new Error(agreements);
   }
 
-  const bidInput = await waitForElement(BID_INPUT_SELECTORS);
+  const bidInput = await waitForBidInput();
   if (!bidInput) {
-    throw new Error("Could not find bid description field.");
+    throw new Error("Could not find the bid proposal field (skipped Clarification Board).");
   }
   await humanClick(bidInput);
   if (humanTyping) {
@@ -974,7 +1054,7 @@ function bidSubmittedSignal(button, before) {
   if (!button.isConnected || !isVisible(button)) return "button gone";
   if (isDisabled(button)) return "button disabled";
   if (button.querySelector("[class*='spinner'], [class*='loading']")) return "button busy";
-  if (!document.querySelector(BID_INPUT_SELECTORS.join(","))) return "bid form gone";
+  if (!findBidInput()) return "bid form gone";
   const confirmation = text.match(CONFIRM_TEXT);
   if (confirmation && !CONFIRM_TEXT.test(before)) return `confirmation: ${confirmation[0]}`;
   return null;
