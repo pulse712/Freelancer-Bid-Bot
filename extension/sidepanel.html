@@ -9,50 +9,103 @@
   </head>
   <body>
     <main class="panel">
-      <h1>Bid Bot</h1>
-      <p id="status">Bids are written by the server. This worker opens projects, fills the bid, and submits.</p>
+      <header class="head">
+        <img src="icons/icon32.png" alt="" />
+        <h1>Bid Bot <span id="nameBadge" class="badge" hidden></span></h1>
+      </header>
+      <p id="status" class="status">Type a project URL below and press Go, or Go + Create Bid.</p>
 
       <section>
-        <h2>Worker settings</h2>
-        <label for="apiBaseUrl">Server URL</label>
-        <input id="apiBaseUrl" type="text" placeholder="https://your-app.vercel.app" />
-        <label for="workerId">Worker ID (account label)</label>
-        <input id="workerId" type="text" placeholder="acc-1" />
-        <label for="workerToken">Worker token</label>
-        <input id="workerToken" type="password" placeholder="Same as server WORKER_TOKEN" />
-        <label class="check-row">
-          <input id="autoSubmit" type="checkbox" />
-          Auto click submit button
-        </label>
-      </section>
-
-      <section>
-        <h2>Automation</h2>
-        <div class="row">
-          <button id="startAutoBtn" type="button">Start Auto</button>
-          <button id="stopAutoBtn" type="button">Stop Auto</button>
-          <button id="runNowBtn" type="button">Run Now</button>
-        </div>
-        <p id="autoStatus">Auto mode is off.</p>
-      </section>
-
-      <section>
-        <h2>Manual</h2>
+        <h2>Project</h2>
         <label for="manualProjectUrl">Freelancer project URL</label>
         <input id="manualProjectUrl" type="text" placeholder="https://www.freelancer.com/projects/..." />
         <div class="row">
-          <button id="openUrlBtn" type="button">Go</button>
-          <button id="createBidFromUrlBtn" type="button" class="secondary">Go + Create Bid</button>
+          <button id="openUrlBtn" type="button" class="secondary">Go</button>
+          <button id="createBidFromUrlBtn" type="button">Go + Create Bid</button>
         </div>
-        <p class="hint">Go opens the project in the worker tab. Enter in the URL box does the same.</p>
+        <label class="check-row">
+          <input id="autoSubmit" type="checkbox" />
+          Click the submit button after typing
+        </label>
+        <label class="check-row">
+          <input id="humanTyping" type="checkbox" checked />
+          Type like a human (character by character)
+        </label>
+        <label for="typingSpeed">Typing speed</label>
+        <select id="typingSpeed">
+          <option value="fast">Fast (about 30 s per 1000 characters)</option>
+          <option value="normal" selected>Normal (about 1 min per 1000 characters)</option>
+          <option value="slow">Slow (about 2 min per 1000 characters)</option>
+        </select>
+      </section>
+
+      <section>
+        <h2>Worker</h2>
+        <label for="workerName">Name (shown here and in results)</label>
+        <input id="workerName" type="text" placeholder="e.g. John - main account" />
+        <label for="workerId">Worker ID (used by the server queue)</label>
+        <input id="workerId" type="text" placeholder="acc-1" />
+      </section>
+
+      <section>
+        <h2>AI</h2>
+        <label for="aiProvider">Provider</label>
+        <select id="aiProvider">
+          <option value="">Select provider</option>
+          <option value="openai">OpenAI</option>
+          <option value="claude">Claude (Anthropic)</option>
+          <option value="gemini">Gemini (Google)</option>
+          <option value="cursor">OpenAI-compatible (OpenRouter, ...)</option>
+        </select>
+        <label for="aiApiKey">API key</label>
+        <input id="aiApiKey" type="password" placeholder="Paste your API key" autocomplete="off" />
+        <div class="row">
+          <button id="testKeyBtn" type="button" class="secondary">Test key</button>
+          <button id="loadModelsBtn" type="button" class="secondary">Load models</button>
+        </div>
+        <p id="testMessage" class="hint"></p>
+        <label for="aiModel">Model</label>
+        <select id="aiModel"></select>
+        <input id="aiModelCustom" type="text" placeholder="Type the model name" hidden />
+        <p id="modelStatus" class="hint"></p>
+        <details>
+          <summary>Advanced: Base URL</summary>
+          <label for="aiBaseUrl">Base URL (only for custom or OpenAI-compatible endpoints)</label>
+          <input id="aiBaseUrl" type="text" placeholder="https://openrouter.ai/api/v1/chat/completions" />
+        </details>
+      </section>
+
+      <section>
+        <h2>Bid prompt</h2>
+        <textarea id="bidPrompt" rows="10"></textarea>
+        <p class="hint" id="placeholderHint"></p>
+        <div class="row">
+          <button id="resetPromptBtn" type="button" class="secondary">Reset to default</button>
+        </div>
       </section>
 
       <section>
         <h2>Last bid</h2>
-        <textarea id="draftOutput" rows="12" readonly placeholder="The last bid this worker filled appears here."></textarea>
+        <textarea id="draftOutput" rows="8" readonly placeholder="The last bid this worker typed appears here."></textarea>
       </section>
+
+      <details class="server">
+        <summary>Server mode (optional)</summary>
+        <p class="hint">Connect to the Bid Bot dashboard to receive queued projects. Leave empty to use this panel alone.</p>
+        <label for="apiBaseUrl">Server URL</label>
+        <input id="apiBaseUrl" type="text" placeholder="https://your-app.vercel.app" />
+        <label for="workerToken">Worker token</label>
+        <input id="workerToken" type="password" placeholder="Same as server WORKER_TOKEN" />
+        <div class="row">
+          <button id="startAutoBtn" type="button">Start Auto</button>
+          <button id="stopAutoBtn" type="button" class="secondary">Stop Auto</button>
+          <button id="runNowBtn" type="button" class="secondary">Run Now</button>
+        </div>
+        <p id="autoStatus" class="hint">Auto mode is off.</p>
+      </details>
     </main>
 
+    <script src="ai.js"></script>
     <script src="sidepanel.app.js"></script>
   </body>
 </html>

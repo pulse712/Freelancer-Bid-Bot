@@ -61,6 +61,11 @@ async function extractWhenReady() {
   return extractFreelancerProject();
 }
 
+function nativeValueSetter(element) {
+  const prototype = element instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+  return Object.getOwnPropertyDescriptor(prototype, "value").set;
+}
+
 function setNativeValue(element, value) {
   element.focus();
   if (element.isContentEditable) {
@@ -68,9 +73,59 @@ function setNativeValue(element, value) {
     element.dispatchEvent(new InputEvent("input", { bubbles: true, data: value }));
     return;
   }
-  const prototype = element instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-  Object.getOwnPropertyDescriptor(prototype, "value").set.call(element, value);
+  nativeValueSetter(element).call(element, value);
   element.dispatchEvent(new Event("input", { bubbles: true }));
+  element.dispatchEvent(new Event("change", { bubbles: true }));
+}
+
+// Typing delay ranges in ms per character.
+const TYPING_SPEEDS = {
+  fast: [15, 45],
+  normal: [35, 95],
+  slow: [70, 160]
+};
+
+function randomBetween(min, max) {
+  return min + Math.random() * (max - min);
+}
+
+function pauseAfter(char, [min, max]) {
+  let delay = randomBetween(min, max);
+  if (char === "\n") delay += randomBetween(250, 600);
+  else if (/[.!?]/.test(char)) delay += randomBetween(150, 400);
+  else if (/[,;:]/.test(char)) delay += randomBetween(60, 180);
+  else if (Math.random() < 0.015) delay += randomBetween(400, 1200); // occasional "thinking" pause
+  return delay;
+}
+
+async function typeLikeHuman(element, text, speed) {
+  const range = TYPING_SPEEDS[speed] || TYPING_SPEEDS.normal;
+  element.focus();
+  element.scrollIntoView({ block: "center" });
+  setNativeValue(element, "");
+  await wait(randomBetween(300, 800));
+
+  let typed = "";
+  let lastProgress = Date.now();
+  for (const char of text) {
+    typed += char;
+    if (element.isContentEditable) {
+      if (!document.execCommand("insertText", false, char)) {
+        element.textContent = typed;
+        element.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: char }));
+      }
+    } else {
+      nativeValueSetter(element).call(element, typed);
+      element.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: char }));
+    }
+    await wait(pauseAfter(char, range));
+
+    // Keep the background worker awake and informed during long bids.
+    if (Date.now() - lastProgress > 4000) {
+      lastProgress = Date.now();
+      chrome.runtime.sendMessage({ type: "TYPING_PROGRESS", typed: typed.length, total: text.length }).catch(() => {});
+    }
+  }
   element.dispatchEvent(new Event("change", { bubbles: true }));
 }
 
@@ -86,7 +141,7 @@ function findSubmitButton() {
   return null;
 }
 
-async function fillBid({ draft, autoSubmit }) {
+async function fillBid({ draft, autoSubmit, humanTyping, typingSpeed }) {
   if (!draft) {
     throw new Error("No draft text to fill.");
   }
@@ -94,13 +149,19 @@ async function fillBid({ draft, autoSubmit }) {
   if (!bidInput) {
     throw new Error("Could not find bid description field.");
   }
-  setNativeValue(bidInput, draft);
+  if (humanTyping) {
+    await typeLikeHuman(bidInput, draft, typingSpeed);
+  } else {
+    setNativeValue(bidInput, draft);
+  }
 
   const submitButton = findSubmitButton();
   if (!submitButton) {
     throw new Error("Could not find submit/place-bid button.");
   }
   if (autoSubmit) {
+    await wait(randomBetween(700, 1800));
+    submitButton.scrollIntoView({ block: "center" });
     submitButton.click();
   }
   return { submitClicked: Boolean(autoSubmit) };

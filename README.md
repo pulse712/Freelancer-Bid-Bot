@@ -57,12 +57,17 @@ Open `http://localhost:8787/`. Without Upstash variables the server uses in-memo
 ## Install the extension (per Octo profile / VPS browser)
 
 1. `chrome://extensions` → Developer mode → Load unpacked → select the `extension/` folder.
-2. In the side panel set:
-   - Server URL: your Vercel URL
-   - Worker ID: unique per account, e.g. `acc-1`
-   - Worker token: same as server `WORKER_TOKEN`
-   - Auto click submit button: leave off until filling works correctly
-3. Click `Start Auto`.
+2. Open the side panel (click the toolbar icon) and fill in:
+   - Worker: a Name for this account and a Worker ID (e.g. `acc-1`).
+   - AI: provider and API key. `Test key` checks the key; `Load models` lists the models the key can use.
+   - Bid prompt: edit freely, same placeholders as the server.
+3. Paste a project URL and press `Go` (opens the page) or `Go + Create Bid` (reads the project, writes the bid with your key, types it, and submits if "Click the submit button" is on).
+
+"Type like a human" types the bid character by character with random pauses; the speed setting controls how long that takes. Leave the submit checkbox off until you have watched a few bids being filled correctly.
+
+### Server mode (optional)
+
+Open "Server mode" at the bottom of the panel, set the Server URL and Worker token (same as `WORKER_TOKEN`), and click `Start Auto`. The worker then picks up projects queued on the dashboard. Bids for queued tasks are written by the server; if a task arrives without a bid, the extension writes one with its own key, or asks the server if no key is saved in the panel.
 
 ## API
 

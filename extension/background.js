@@ -1,3 +1,5 @@
+importScripts("freelancer.js", "ai.js");
+
 const ALARM_NAME = "bidbot-poll";
 const POLL_PERIOD_MINUTES = 0.5;
 const MAX_TASKS_PER_TICK = 5;
@@ -8,11 +10,33 @@ async function readSettings() {
   return chrome.storage.local.get([
     "apiBaseUrl",
     "workerId",
+    "workerName",
     "workerToken",
     "autoSubmit",
+    "humanTyping",
+    "typingSpeed",
     "automationEnabled",
-    "workerTabId"
+    "workerTabId",
+    "aiProvider",
+    "aiApiKey",
+    "aiModel",
+    "aiBaseUrl",
+    "bidPrompt"
   ]);
+}
+
+function aiSettingsFrom(settings) {
+  return {
+    provider: settings.aiProvider || "",
+    apiKey: settings.aiApiKey || "",
+    model: settings.aiModel || "",
+    baseUrl: settings.aiBaseUrl || "",
+    prompt: settings.bidPrompt || ""
+  };
+}
+
+function hasLocalAi(settings) {
+  return Boolean(settings.aiProvider && settings.aiApiKey);
 }
 
 function wait(ms) {
@@ -24,7 +48,10 @@ function isFreelancerUrl(url) {
 }
 
 async function apiFetch(settings, path, options = {}) {
-  const baseUrl = (settings.apiBaseUrl || "http://localhost:8787").replace(/\/+$/, "");
+  if (!settings.apiBaseUrl) {
+    throw new Error("Server URL is not set in the side panel.");
+  }
+  const baseUrl = settings.apiBaseUrl.replace(/\/+$/, "");
   const headers = { "Content-Type": "application/json" };
   if (settings.workerToken) {
     headers["x-worker-token"] = settings.workerToken;
@@ -99,24 +126,47 @@ async function fillBidInTab(tabId, settings, draft) {
   const { submitClicked } = await sendToTab(tabId, {
     type: "FILL_BID",
     draft,
-    autoSubmit: Boolean(settings.autoSubmit)
+    autoSubmit: Boolean(settings.autoSubmit),
+    humanTyping: settings.humanTyping !== false,
+    typingSpeed: settings.typingSpeed || "normal"
   });
   return submitClicked;
 }
 
-async function createBidInTab(tabId, settings, serverDraft) {
+async function readProject(tabId, url) {
+  try {
+    return { project: await BidBotFreelancer.fetchProject(url), projectSource: "api" };
+  } catch (error) {
+    console.warn("Freelancer API lookup failed, reading the page instead:", error.message);
+  }
+  const { project } = await sendToTab(tabId, { type: "EXTRACT_PROJECT" });
+  return { project, projectSource: "page" };
+}
+
+async function writeDraft(settings, project) {
+  if (hasLocalAi(settings)) {
+    return { draft: await BidBotAI.generateBid(project, aiSettingsFrom(settings)), draftSource: "extension" };
+  }
+  if (settings.apiBaseUrl) {
+    const { draft } = await apiFetch(settings, "/api/draft-bid", {
+      method: "POST",
+      body: JSON.stringify({ project })
+    });
+    return { draft, draftSource: "server" };
+  }
+  throw new Error("No AI API key saved in the side panel and no Server URL to ask instead.");
+}
+
+async function createBidInTab(tabId, settings, serverDraft, url) {
   if (serverDraft) {
     const submitClicked = await fillBidInTab(tabId, settings, serverDraft);
     return { draft: serverDraft, draftSource: "server", submitClicked };
   }
 
-  const { project } = await sendToTab(tabId, { type: "EXTRACT_PROJECT" });
-  const { draft } = await apiFetch(settings, "/api/draft-bid", {
-    method: "POST",
-    body: JSON.stringify({ project })
-  });
+  const { project, projectSource } = await readProject(tabId, url);
+  const { draft, draftSource } = await writeDraft(settings, project);
   const submitClicked = await fillBidInTab(tabId, settings, draft);
-  return { project, draft, draftSource: "page", submitClicked };
+  return { project, projectSource, draft, draftSource, submitClicked };
 }
 
 async function reportTaskResult(settings, payload) {
@@ -143,14 +193,16 @@ async function processTask(settings, task) {
 
   try {
     const tab = await navigateWorkerTab(task.url);
-    const result = await createBidInTab(tab.id, settings, task.draft);
+    const result = await createBidInTab(tab.id, settings, task.draft, task.url);
+    await chrome.storage.local.set({ lastDraft: result.draft, lastDraftAt: new Date().toISOString() });
     await reportTaskResult(settings, {
       ...base,
       status: "success",
       details: {
         pageUrl: task.url,
         submitClicked: result.submitClicked,
-        draftSource: result.draftSource
+        draftSource: result.draftSource,
+        workerName: settings.workerName || ""
       }
     });
   } catch (error) {
@@ -235,10 +287,17 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return respondWith(
       readSettings().then(async (settings) => {
         const tab = await navigateWorkerTab(url);
-        return createBidInTab(tab.id, settings);
+        const result = await createBidInTab(tab.id, settings, null, url);
+        await chrome.storage.local.set({ lastDraft: result.draft, lastDraftAt: new Date().toISOString() });
+        return result;
       }),
       sendResponse
     );
+  }
+
+  if (message?.type === "TYPING_PROGRESS") {
+    sendResponse({ ok: true });
+    return false;
   }
 
   if (message?.type === "MANUAL_OPEN_URL") {
