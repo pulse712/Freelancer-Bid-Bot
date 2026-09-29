@@ -33,8 +33,6 @@ module.exports = `<!doctype html>
     .outcome-submitted { color: #5fd37a; }
     .outcome-filled { color: #8fb0ff; }
     .outcome-failed { color: #ff6b6b; }
-    .banner { background: #3a2a12; border: 1px solid #8a5a1a; color: #ffc857; border-radius: 8px; padding: 10px 12px; font-size: 12px; margin: 8px 0 4px; }
-    .banner code { color: #fff; }
   </style>
 </head>
 <body>
@@ -42,10 +40,6 @@ module.exports = `<!doctype html>
     <h1>Bid Bot</h1>
     <button type="button" id="logoutBtn" class="logout" hidden>Log out</button>
   </header>
-  <div class="banner" id="authWarning" hidden>
-    This dashboard has no password. Anyone with the URL can queue projects.
-    Set a <code>DASHBOARD_PASSWORD</code> environment variable in Vercel (or .env) and redeploy to require a login.
-  </div>
 
   <div class="stats" id="stats"></div>
   <div class="hint">Counts cover the last 100 tasks. Refreshes every 10 seconds. Bids are written by each worker's extension, not this dashboard.</div>
@@ -98,7 +92,6 @@ module.exports = `<!doctype html>
       try {
         const session = await api("/api/session");
         $("logoutBtn").hidden = !session.passwordEnabled;
-        $("authWarning").hidden = session.passwordEnabled;
       } catch (_error) {
         // Not critical; the page still works without session info.
       }
