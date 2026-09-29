@@ -87,12 +87,6 @@ module.exports = `<!doctype html>
     <tbody id="workersBody"></tbody>
   </table>
 
-  <h2>Tasks</h2>
-  <table>
-    <thead><tr><th>Created</th><th>Worker</th><th>Project</th><th>Bid</th><th>Status</th><th>Attempts</th><th>Result</th><th></th></tr></thead>
-    <tbody id="tasksBody"></tbody>
-  </table>
-
   <script>
     const $ = (id) => document.getElementById(id);
     const ONLINE_WINDOW_MS = 90 * 1000;
@@ -130,12 +124,6 @@ module.exports = `<!doctype html>
 
     function formatTime(iso) {
       return iso ? new Date(iso).toLocaleString() : "-";
-    }
-
-    function describeResult(task) {
-      if (task.result && task.result.error) return task.result.error;
-      if (task.result) return task.result.submitClicked ? "Submitted" : "Filled, not submitted";
-      return task.note || "";
     }
 
     function workerLabel(workerId) {
@@ -307,45 +295,6 @@ module.exports = `<!doctype html>
       }
     }
 
-    function renderBidCell(row, task) {
-      const td = cell(row, task.draft ? "" : "-");
-      if (!task.draft) return;
-      const details = document.createElement("details");
-      const summary = document.createElement("summary");
-      summary.textContent = "View bid";
-      const pre = document.createElement("pre");
-      pre.textContent = task.draft;
-      details.append(summary, pre);
-      td.appendChild(details);
-    }
-
-    function renderTasks(tasks) {
-      $("tasksBody").replaceChildren();
-      for (const task of tasks) {
-        const row = document.createElement("tr");
-        cell(row, formatTime(task.createdAt));
-        cell(row, workerLabel(task.workerId));
-        renderProjectCell(row, task.project && task.project.title, task.url);
-        renderBidCell(row, task);
-        cell(row, task.status, "status-" + task.status);
-        cell(row, task.attempts || 0);
-        cell(row, describeResult(task));
-        const actions = cell(row, "");
-        if (task.status === "failed" || task.status === "done") {
-          const retry = document.createElement("button");
-          retry.textContent = "Retry";
-          retry.title = "Queue this project again for the worker";
-          retry.addEventListener("click", async () => {
-            retry.disabled = true;
-            await api("/api/tasks/" + encodeURIComponent(task.id) + "/retry", { method: "POST" }).catch(() => {});
-            refresh();
-          });
-          actions.appendChild(retry);
-        }
-        $("tasksBody").appendChild(row);
-      }
-    }
-
     function migrateOldCache() {
       if (loadLocalRoster().length) return;
       try {
@@ -404,7 +353,6 @@ module.exports = `<!doctype html>
         renderWorkers(workers);
         renderStats(tasksPayload.tasks);
         renderResults(resultsPayload.results);
-        renderTasks(tasksPayload.tasks);
         writeCache(workers, tasksPayload.tasks, resultsPayload.results);
       } catch (error) {
         const local = loadLocalRoster();
