@@ -33,6 +33,16 @@ module.exports = `<!doctype html>
     .outcome-submitted { color: #5fd37a; }
     .outcome-filled { color: #8fb0ff; }
     .outcome-failed { color: #ff6b6b; }
+    .add-row { display: grid; grid-template-columns: 1fr 1fr auto; gap: 8px; align-items: end; margin: 8px 0 12px; }
+    .add-row label { margin: 0 0 4px; }
+    .add-row input { margin: 0; }
+    .add-row button { margin: 0; }
+    .send-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+    .send-row button { margin: 0; }
+    button.danger { background: #2f3244; color: #ff6b6b; }
+    button:disabled { opacity: 0.55; cursor: default; }
+    .worker-name { font-weight: bold; }
+    .worker-id { font-size: 11px; color: #8a8ea8; }
   </style>
 </head>
 <body>
@@ -44,26 +54,36 @@ module.exports = `<!doctype html>
   <div class="stats" id="stats"></div>
   <div class="hint">Counts cover the last 100 tasks. Refreshes every 10 seconds.</div>
 
-  <h2>Send projects to a worker</h2>
-  <p class="hint">Pick the Worker ID of an extension that has Auto on. Each URL is sent to that worker; the extension opens it and bids.</p>
-  <label for="workerId">Worker ID</label>
-  <input id="workerId" list="workerList" placeholder="acc-1" />
-  <datalist id="workerList"></datalist>
+  <h2>Workers</h2>
+  <p class="hint">Add each extension once. The Worker ID must match the ID in that extension. Then send URLs with the worker's button.</p>
+  <div class="add-row">
+    <div>
+      <label for="newWorkerName">Name</label>
+      <input id="newWorkerName" placeholder="e.g. John" />
+    </div>
+    <div>
+      <label for="newWorkerId">Worker ID</label>
+      <input id="newWorkerId" placeholder="e.g. acc-1" />
+    </div>
+    <button id="addWorkerBtn" type="button">Add worker</button>
+  </div>
+  <p class="message" id="rosterMessage"></p>
+  <table>
+    <thead><tr><th>Worker</th><th>Status</th><th>Last seen</th><th></th></tr></thead>
+    <tbody id="workersBody"></tbody>
+  </table>
+
+  <h2>Send projects</h2>
+  <p class="hint">Paste URLs, then click a worker button. That extension opens each project and bids if Auto is on.</p>
   <label for="urls">Freelancer project URLs (one per line)</label>
   <textarea id="urls" rows="4" placeholder="https://www.freelancer.com/projects/..."></textarea>
-  <button id="queueBtn" type="button">Send to worker</button>
+  <div class="send-row" id="sendButtons"></div>
   <p class="message" id="queueMessage"></p>
 
   <h2>Working results</h2>
   <table>
     <thead><tr><th>Time</th><th>Worker</th><th>Project</th><th>Outcome</th><th>Details</th></tr></thead>
     <tbody id="resultsBody"></tbody>
-  </table>
-
-  <h2>Workers</h2>
-  <table>
-    <thead><tr><th>Worker</th><th>Status</th><th>Last seen</th></tr></thead>
-    <tbody id="workersBody"></tbody>
   </table>
 
   <h2>Tasks</h2>
@@ -75,8 +95,7 @@ module.exports = `<!doctype html>
   <script>
     const $ = (id) => document.getElementById(id);
     const ONLINE_WINDOW_MS = 90 * 1000;
-
-    $("workerId").value = localStorage.getItem("bidbotWorkerId") || "";
+    let roster = [];
 
     async function api(path, options = {}) {
       const response = await fetch(path, { ...options, headers: { "Content-Type": "application/json" } });
@@ -116,19 +135,66 @@ module.exports = `<!doctype html>
       return task.note || "";
     }
 
+    function workerLabel(workerId) {
+      const match = roster.find((item) => item.workerId === workerId);
+      return match ? match.name + " (" + match.workerId + ")" : workerId;
+    }
+
+    function renderSendButtons() {
+      const row = $("sendButtons");
+      row.replaceChildren();
+      if (!roster.length) {
+        const hint = document.createElement("p");
+        hint.className = "hint";
+        hint.textContent = "Add a worker above, then a Send button appears here.";
+        hint.style.margin = "0";
+        row.appendChild(hint);
+        return;
+      }
+      for (const worker of roster) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = "Send to " + worker.name;
+        button.addEventListener("click", () => sendUrlsToWorker(worker));
+        row.appendChild(button);
+      }
+    }
+
     function renderWorkers(workers) {
+      roster = workers;
       $("workersBody").replaceChildren();
-      $("workerList").replaceChildren();
-      for (const worker of workers) {
-        const online = Date.now() - Date.parse(worker.lastSeen) < ONLINE_WINDOW_MS;
+      renderSendButtons();
+      if (!workers.length) {
         const row = document.createElement("tr");
-        cell(row, worker.workerId);
+        cell(row, "No workers yet. Add a name and Worker ID above.").colSpan = 4;
+        $("workersBody").appendChild(row);
+        return;
+      }
+      for (const worker of workers) {
+        const online = worker.lastSeen && Date.now() - Date.parse(worker.lastSeen) < ONLINE_WINDOW_MS;
+        const row = document.createElement("tr");
+        const nameCell = cell(row, "");
+        const nameEl = document.createElement("div");
+        nameEl.className = "worker-name";
+        nameEl.textContent = worker.name;
+        const idEl = document.createElement("div");
+        idEl.className = "worker-id";
+        idEl.textContent = worker.workerId;
+        nameCell.append(nameEl, idEl);
         cell(row, online ? "online" : "offline", online ? "online" : "offline");
         cell(row, formatTime(worker.lastSeen));
+        const actions = cell(row, "");
+        const send = document.createElement("button");
+        send.type = "button";
+        send.textContent = "Send URLs";
+        send.addEventListener("click", () => sendUrlsToWorker(worker));
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.className = "danger";
+        remove.textContent = "Remove";
+        remove.addEventListener("click", () => removeWorker(worker));
+        actions.append(send, remove);
         $("workersBody").appendChild(row);
-        const option = document.createElement("option");
-        option.value = worker.workerId;
-        $("workerList").appendChild(option);
       }
     }
 
@@ -194,7 +260,7 @@ module.exports = `<!doctype html>
         const row = document.createElement("tr");
         const outcome = outcomeOf(result.status, result.details);
         cell(row, formatTime(result.at));
-        cell(row, result.workerId);
+        cell(row, workerLabel(result.workerId));
         renderProjectCell(row, result.title, result.url);
         cell(row, outcome.text, outcome.className);
         cell(row, (result.details && result.details.error) || "");
@@ -219,7 +285,7 @@ module.exports = `<!doctype html>
       for (const task of tasks) {
         const row = document.createElement("tr");
         cell(row, formatTime(task.createdAt));
-        cell(row, task.workerId);
+        cell(row, workerLabel(task.workerId));
         renderProjectCell(row, task.project && task.project.title, task.url);
         renderBidCell(row, task);
         cell(row, task.status, "status-" + task.status);
@@ -257,24 +323,68 @@ module.exports = `<!doctype html>
       }
     }
 
-    $("queueBtn").addEventListener("click", async () => {
-      const workerId = $("workerId").value.trim();
+    async function sendUrlsToWorker(worker) {
       const urls = $("urls").value.split("\\n").map((line) => line.trim()).filter(Boolean);
-      localStorage.setItem("bidbotWorkerId", workerId);
-      $("queueBtn").disabled = true;
-      $("queueMessage").textContent = "Sending URLs to worker " + workerId + "...";
+      if (!urls.length) {
+        $("queueMessage").textContent = "Paste at least one Freelancer URL first.";
+        return;
+      }
+      $("queueMessage").textContent = "Sending URLs to " + worker.name + "...";
+      document.querySelectorAll(".send-row button, #workersBody button").forEach((button) => {
+        button.disabled = true;
+      });
       try {
-        const { tasks } = await api("/api/tasks", { method: "POST", body: JSON.stringify({ workerId, urls }) });
+        const { tasks } = await api("/api/tasks", { method: "POST", body: JSON.stringify({ workerId: worker.workerId, urls }) });
         const failed = tasks.filter((task) => task.status === "failed").length;
         $("queueMessage").textContent =
-          "Sent " + (tasks.length - failed) + " of " + tasks.length + " URL(s) to " + workerId + "." +
+          "Sent " + (tasks.length - failed) + " of " + tasks.length + " URL(s) to " + worker.name + "." +
           (failed ? " " + failed + " failed - see Result column." : " The extension will bid when Auto is on.");
         $("urls").value = "";
         refresh();
       } catch (error) {
-        $("queueMessage").textContent = "Queue failed: " + error.message;
+        $("queueMessage").textContent = "Send failed: " + error.message;
       } finally {
-        $("queueBtn").disabled = false;
+        document.querySelectorAll(".send-row button, #workersBody button").forEach((button) => {
+          button.disabled = false;
+        });
+      }
+    }
+
+    async function removeWorker(worker) {
+      try {
+        const payload = await api("/api/workers/" + encodeURIComponent(worker.workerId), { method: "DELETE" });
+        renderWorkers(payload.workers);
+        $("rosterMessage").textContent = "Removed " + worker.name + ".";
+      } catch (error) {
+        $("rosterMessage").textContent = "Could not remove worker: " + error.message;
+      }
+    }
+
+    $("addWorkerBtn").addEventListener("click", async () => {
+      const name = $("newWorkerName").value.trim();
+      const workerId = $("newWorkerId").value.trim();
+      if (!workerId) {
+        $("rosterMessage").textContent = "Enter a Worker ID that matches the extension.";
+        return;
+      }
+      $("addWorkerBtn").disabled = true;
+      try {
+        const payload = await api("/api/workers", { method: "POST", body: JSON.stringify({ name, workerId }) });
+        renderWorkers(payload.workers);
+        $("newWorkerName").value = "";
+        $("newWorkerId").value = "";
+        $("rosterMessage").textContent = "Added " + (name || workerId) + ". Use its Send button after you paste URLs.";
+      } catch (error) {
+        $("rosterMessage").textContent = "Could not add worker: " + error.message;
+      } finally {
+        $("addWorkerBtn").disabled = false;
+      }
+    });
+
+    $("newWorkerId").addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        $("addWorkerBtn").click();
       }
     });
 

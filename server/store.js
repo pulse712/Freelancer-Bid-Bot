@@ -177,6 +177,45 @@ async function listWorkers() {
   return workers;
 }
 
+async function listRoster() {
+  const raw = await cmd("GET", "roster");
+  return raw ? JSON.parse(raw) : [];
+}
+
+async function saveRoster(roster) {
+  await cmd("SET", "roster", JSON.stringify(roster));
+  return roster;
+}
+
+async function upsertRosterWorker(workerId, name) {
+  const id = String(workerId || "").trim();
+  if (!id) throw new Error("Worker ID is required");
+  const label = String(name || "").trim() || id;
+  const roster = await listRoster();
+  const existing = roster.find((item) => item.workerId === id);
+  if (existing) {
+    existing.name = label;
+  } else {
+    roster.push({ workerId: id, name: label });
+  }
+  return saveRoster(roster);
+}
+
+async function removeRosterWorker(workerId) {
+  const roster = (await listRoster()).filter((item) => item.workerId !== workerId);
+  return saveRoster(roster);
+}
+
+async function listDashboardWorkers() {
+  const [roster, live] = await Promise.all([listRoster(), listWorkers()]);
+  const seen = Object.fromEntries(live.map((item) => [item.workerId, item]));
+  return roster.map((item) => ({
+    workerId: item.workerId,
+    name: item.name || item.workerId,
+    lastSeen: seen[item.workerId]?.lastSeen || null
+  }));
+}
+
 async function getSettings() {
   const raw = await cmd("GET", "settings");
   return raw ? JSON.parse(raw) : {};
@@ -201,5 +240,9 @@ module.exports = {
   listRecentTasks,
   listResults,
   touchWorker,
-  listWorkers
+  listWorkers,
+  listRoster,
+  upsertRosterWorker,
+  removeRosterWorker,
+  listDashboardWorkers
 };

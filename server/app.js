@@ -217,7 +217,28 @@ app.get(
 app.get(
   "/api/workers",
   asyncRoute(async (_req, res) => {
-    return res.json({ workers: await store.listWorkers() });
+    return res.json({ workers: await store.listDashboardWorkers() });
+  })
+);
+
+app.post(
+  "/api/workers",
+  asyncRoute(async (req, res) => {
+    const workerId = String(req.body?.workerId || "").trim();
+    const name = String(req.body?.name || "").trim();
+    if (!workerId) {
+      return res.status(400).json({ error: "workerId is required" });
+    }
+    const roster = await store.upsertRosterWorker(workerId, name);
+    return res.json({ ok: true, workers: await store.listDashboardWorkers(), roster });
+  })
+);
+
+app.delete(
+  "/api/workers/:workerId",
+  asyncRoute(async (req, res) => {
+    await store.removeRosterWorker(req.params.workerId);
+    return res.json({ ok: true, workers: await store.listDashboardWorkers() });
   })
 );
 
