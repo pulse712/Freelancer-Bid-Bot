@@ -26,10 +26,6 @@ module.exports = `<!doctype html>
     .message { font-size: 12px; color: #c7c9d9; }
     header { display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #2c2f44; margin-bottom: 8px; padding-bottom: 8px; }
     .logout { margin: 0; background: #2f3244; color: #c7c9d9; }
-    .stats { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin-top: 12px; }
-    .stat { background: #171a27; border: 1px solid #2c2f44; border-radius: 8px; padding: 10px 12px; }
-    .stat .value { font-size: 22px; font-weight: bold; }
-    .stat .label { font-size: 11px; color: #8a8ea8; margin-top: 2px; }
     .outcome-submitted { color: #5fd37a; }
     .outcome-filled { color: #8fb0ff; }
     .outcome-failed { color: #ff6b6b; }
@@ -63,10 +59,6 @@ module.exports = `<!doctype html>
     <thead><tr><th>Time</th><th>Worker</th><th>Project</th><th>Outcome</th><th>Details</th></tr></thead>
     <tbody id="resultsBody"></tbody>
   </table>
-
-  <h2>Bid counts</h2>
-  <div class="stats" id="stats"></div>
-  <div class="hint">Counts cover the last 100 tasks. Refreshes every 10 seconds.</div>
 
   <h2>Workers</h2>
   <p class="hint">Add each extension once. The Worker ID must match the ID in that extension. Then send URLs with the worker's button.</p>
@@ -243,38 +235,6 @@ module.exports = `<!doctype html>
       return { text: "Filled, not submitted", className: "outcome-filled" };
     }
 
-    function renderStats(tasks) {
-      const counts = { queued: 0, dispatched: 0, submitted: 0, filled: 0, failed: 0 };
-      for (const task of tasks) {
-        if (task.status === "done") {
-          counts[task.result && task.result.submitClicked ? "submitted" : "filled"] += 1;
-        } else if (counts[task.status] !== undefined) {
-          counts[task.status] += 1;
-        }
-      }
-      const cards = [
-        ["Queued", counts.queued],
-        ["In progress", counts.dispatched],
-        ["Submitted", counts.submitted, "outcome-submitted"],
-        ["Filled, not submitted", counts.filled, "outcome-filled"],
-        ["Failed", counts.failed, "outcome-failed"]
-      ];
-      $("stats").replaceChildren(
-        ...cards.map(([label, value, className]) => {
-          const card = document.createElement("div");
-          card.className = "stat";
-          const valueEl = document.createElement("div");
-          valueEl.className = "value " + (className || "");
-          valueEl.textContent = value;
-          const labelEl = document.createElement("div");
-          labelEl.className = "label";
-          labelEl.textContent = label;
-          card.append(valueEl, labelEl);
-          return card;
-        })
-      );
-    }
-
     function renderResults(results) {
       $("resultsBody").replaceChildren();
       if (!results.length) {
@@ -351,7 +311,6 @@ module.exports = `<!doctype html>
         if (!workers.length && local.length) workers = local;
 
         renderWorkers(workers);
-        renderStats(tasksPayload.tasks);
         renderResults(resultsPayload.results);
         writeCache(workers, tasksPayload.tasks, resultsPayload.results);
       } catch (error) {
