@@ -51,6 +51,20 @@ module.exports = `<!doctype html>
     <button type="button" id="logoutBtn" class="logout" hidden>Log out</button>
   </header>
 
+  <h2>Send projects</h2>
+  <p class="hint">Paste URLs, then click a worker button. That extension opens each project and bids if Auto is on.</p>
+  <label for="urls">Freelancer project URLs (one per line)</label>
+  <textarea id="urls" rows="4" placeholder="https://www.freelancer.com/projects/..."></textarea>
+  <div class="send-row" id="sendButtons"></div>
+  <p class="message" id="queueMessage"></p>
+
+  <h2>Working results</h2>
+  <table>
+    <thead><tr><th>Time</th><th>Worker</th><th>Project</th><th>Outcome</th><th>Details</th></tr></thead>
+    <tbody id="resultsBody"></tbody>
+  </table>
+
+  <h2>Bid counts</h2>
   <div class="stats" id="stats"></div>
   <div class="hint">Counts cover the last 100 tasks. Refreshes every 10 seconds.</div>
 
@@ -71,19 +85,6 @@ module.exports = `<!doctype html>
   <table>
     <thead><tr><th>Worker</th><th>Status</th><th>Last seen</th><th></th></tr></thead>
     <tbody id="workersBody"></tbody>
-  </table>
-
-  <h2>Send projects</h2>
-  <p class="hint">Paste URLs, then click a worker button. That extension opens each project and bids if Auto is on.</p>
-  <label for="urls">Freelancer project URLs (one per line)</label>
-  <textarea id="urls" rows="4" placeholder="https://www.freelancer.com/projects/..."></textarea>
-  <div class="send-row" id="sendButtons"></div>
-  <p class="message" id="queueMessage"></p>
-
-  <h2>Working results</h2>
-  <table>
-    <thead><tr><th>Time</th><th>Worker</th><th>Project</th><th>Outcome</th><th>Details</th></tr></thead>
-    <tbody id="resultsBody"></tbody>
   </table>
 
   <h2>Tasks</h2>
@@ -148,7 +149,7 @@ module.exports = `<!doctype html>
       if (!roster.length) {
         const hint = document.createElement("p");
         hint.className = "hint";
-        hint.textContent = "Add a worker above, then a Send button appears here.";
+        hint.textContent = "Add a worker in the Workers section below, then a Send button appears here.";
         hint.style.margin = "0";
         row.appendChild(hint);
         return;
