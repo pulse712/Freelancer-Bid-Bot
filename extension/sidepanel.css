@@ -95,10 +95,73 @@ p {
   color: #c7c9d9;
 }
 
-.row {
-  display: flex;
+.term-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
   gap: 8px;
-  margin-bottom: 8px;
+}
+
+.term-row input {
+  margin-bottom: 0;
+}
+
+h3.rules-head {
+  margin: 10px 0 4px;
+  font-size: 12px;
+  color: #c7c9d9;
+  font-weight: 600;
+}
+
+.rules-legend {
+  margin: 0 0 4px;
+  font-size: 11px;
+  color: #8a8ea8;
+}
+
+.rules-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.rule-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 12px minmax(0, 1fr) 14px minmax(0, 1fr) 44px 26px;
+  gap: 4px;
+  align-items: center;
+}
+
+.rule-row.hourly {
+  grid-template-columns: minmax(0, 1fr) 12px minmax(0, 1fr) 14px minmax(0, 1fr) 26px;
+}
+
+.rule-row input {
+  margin: 0;
+  padding: 6px 4px;
+  font-size: 11px;
+}
+
+.rule-row .dash,
+.rule-row .arrow {
+  color: #8a8ea8;
+  font-size: 11px;
+  text-align: center;
+}
+
+.rule-remove {
+  background: transparent;
+  color: #ff6b6b;
+  padding: 4px 0;
+  font-size: 14px;
+  line-height: 1;
+}
+
+#addFixedRuleBtn,
+#addHourlyRuleBtn,
+#resetBudgetRulesBtn {
+  width: 100%;
+  margin-top: 4px;
 }
 
 button {

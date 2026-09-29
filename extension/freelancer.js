@@ -40,11 +40,15 @@
     if (!project) {
       throw new Error("Project not found in Freelancer API");
     }
+    const minimum = Number(project.budget?.minimum) || 0;
+    const maximum = Number(project.budget?.maximum) || minimum;
     return {
       id: project.id,
       title: project.title || "",
       description: project.description || "",
       budget: formatBudget(project),
+      budgetMin: minimum,
+      budgetMax: maximum,
       type: project.type || "",
       skills: (project.jobs || []).map((job) => job.name).join(", "),
       pageUrl: url

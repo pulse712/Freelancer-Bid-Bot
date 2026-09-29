@@ -134,6 +134,9 @@ async function finishTask(task, status, details) {
   task.status = status === "success" ? "done" : "failed";
   task.finishedAt = new Date().toISOString();
   task.result = details || null;
+  if (details && details.draft) {
+    task.draft = details.draft;
+  }
   await saveTask(task);
   await cmd("SREM", `inflight:${task.workerId}`, task.id);
 

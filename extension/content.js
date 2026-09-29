@@ -411,63 +411,96 @@ function visibleDeep(selector) {
   return sameOriginFrames().flatMap((doc) => queryDeep(doc, selector)).filter(isVisible);
 }
 
-function unsignedAgreementLinks() {
-  const clickables = visibleDeep("a, button, [role='button'], [role='link']").filter((element) => {
-    const text = normalizedText(element);
-    return text.length > 0 && text.length < 80 && Boolean(agreementKindOf(text));
-  });
+function dialogRoots() {
+  return visibleDeep(
+    "[role='dialog'], [aria-modal='true'], .modal, [class*='Modal'], [class*='modal'], [class*='overlay'], [class*='Overlay'], [class*='dialog'], [class*='Dialog'], [class*='popup'], [class*='Popup']"
+  ).filter((element) => element.getBoundingClientRect().width > 180);
+}
 
+function signerIframes() {
+  const frames = visibleDeep("iframe").filter((frame) => {
+    const rect = frame.getBoundingClientRect();
+    return rect.width > 200 && rect.height > 120;
+  });
+  const bySrc = frames.filter((frame) => {
+    const src = `${frame.src || ""} ${frame.getAttribute("name") || ""} ${frame.className || ""}`.toLowerCase();
+    return /hellosign|dropboxsign|hs-embed|embeddedsigning|app\.hellosign|embedded\.hellosign/i.test(src);
+  });
+  if (bySrc.length) return bySrc;
+  const inDialog = frames.filter((frame) => {
+    const rect = frame.getBoundingClientRect();
+    return rect.width > 360 && rect.height > 240 && Boolean(frame.closest("[role='dialog'], [aria-modal='true'], .modal, [class*='Modal'], [class*='overlay']"));
+  });
+  return inDialog;
+}
+
+function mustSignBanner(element) {
+  const text = normalizedText(element);
+  return text.length > 0 && text.length < 900 && /you must sign|please sign the freelancer|before you can (place a )?bid|to work on this project/i.test(text);
+}
+
+function isAgreementEntryLink(element) {
+  const text = normalizedText(element);
+  if (!text || text.length > 55) return false;
+  return (
+    /^(the )?(non[-\s]?disclosure agreement|nda)$/i.test(text) ||
+    /^(the )?(ip agreement|intellectual property agreement)$/i.test(text) ||
+    Boolean(agreementKindOf(text) && text.length < 40)
+  );
+}
+
+function findAgreementEntryLinks() {
   const banners = [];
   for (const doc of sameOriginFrames()) {
     const candidates = queryDeep(
       doc,
-      "a, button, p, div, span, section, aside, li, h2, h3, [class*='alert'], [class*='banner'], [class*='notice'], [class*='warning']"
+      "a, button, p, div, span, section, aside, li, article, [class*='alert'], [class*='banner'], [class*='notice'], [class*='warning']"
     );
     for (const element of candidates) {
-      if (!isVisible(element)) continue;
-      const text = normalizedText(element);
-      if (/you must sign/i.test(text) && text.length < 800) banners.push(element);
+      if (isVisible(element) && mustSignBanner(element)) banners.push(element);
     }
   }
 
-  const fromBanners = [];
+  const found = [];
+  const consider = (scope) => {
+    const inner = queryDeep(scope, "a, button, [role='link'], [role='button']").filter((element) => isVisible(element) && isAgreementEntryLink(element));
+    inner.sort((a, b) => normalizedText(a).length - normalizedText(b).length);
+    found.push(...inner);
+  };
+
   for (const banner of banners) {
-    const inside = clickables.filter((link) => banner.contains(link));
-    if (inside.length) fromBanners.push(...inside);
-    else {
-      const kind = agreementKindOf(normalizedText(banner));
-      const nearby = clickables.find((link) => agreementKindOf(normalizedText(link)) === kind);
-      if (nearby) fromBanners.push(nearby);
+    let scope = banner;
+    for (let depth = 0; depth < 6 && scope; depth += 1) {
+      const before = found.length;
+      consider(scope);
+      if (found.length > before) break;
+      scope = scope.parentElement;
     }
   }
-  const chosen = fromBanners.length ? fromBanners : clickables;
+
+  if (!found.length) {
+    found.push(
+      ...visibleDeep("a, button, [role='link'], [role='button']").filter((element) => isAgreementEntryLink(element))
+    );
+  }
+
   const unique = [];
   const seen = new Set();
-  for (const link of chosen) {
+  for (const link of found) {
     const kind = agreementKindOf(normalizedText(link)) || normalizedText(link);
     if (seen.has(kind)) continue;
     seen.add(kind);
     unique.push(link);
   }
+  unique.sort((a, b) => {
+    const order = { nda: 0, ip: 1 };
+    return (order[agreementKindOf(normalizedText(a))] ?? 2) - (order[agreementKindOf(normalizedText(b))] ?? 2);
+  });
   return unique;
 }
 
-function dialogRoots() {
-  return visibleDeep("[role='dialog'], [aria-modal='true'], .modal, [class*='Modal'], [class*='modal'], [class*='overlay'], [class*='Overlay']").filter(
-    (element) => element.getBoundingClientRect().width > 180
-  );
-}
-
-function signerIframes() {
-  return visibleDeep("iframe").filter((frame) => {
-    const src = `${frame.src || ""} ${frame.getAttribute("name") || ""}`.toLowerCase();
-    const rect = frame.getBoundingClientRect();
-    return (
-      rect.width > 200 &&
-      rect.height > 120 &&
-      /hellosign|dropbox|sign|hs-embed|embedded/i.test(src)
-    );
-  });
+function unsignedAgreementLinks() {
+  return findAgreementEntryLinks();
 }
 
 function isYellowish(element) {
@@ -546,51 +579,332 @@ async function typeIntoField(element, value) {
 }
 
 function signatureCanvas(root) {
-  return queryDeep(root, "canvas").find((canvas) => {
-    const rect = canvas.getBoundingClientRect();
-    return isVisible(canvas) && rect.width >= 100 && rect.height >= 36;
+  return largestDrawCanvas(root);
+}
+
+function largestDrawCanvas(root) {
+  const canvases = queryDeep(root, "canvas")
+    .filter((canvas) => {
+      const rect = canvas.getBoundingClientRect();
+      return isVisible(canvas) && rect.width >= 80 && rect.height >= 28;
+    })
+    .sort((a, b) => {
+      const ra = a.getBoundingClientRect();
+      const rb = b.getBoundingClientRect();
+      return rb.width * rb.height - ra.width * ra.height;
+    });
+  return canvases[0] || null;
+}
+
+function signatureDrawHint(root) {
+  return queryDeep(root, "h1, h2, h3, h4, div, span, p, legend, label, strong").find((element) => {
+    if (!isVisible(element)) return false;
+    const text = normalizedText(element);
+    return text.length < 90 && /add your signature|draw your signature|use your mouse to draw/i.test(text);
   });
+}
+
+function signatureModalRoot() {
+  for (const doc of sameOriginFrames()) {
+    const hint = signatureDrawHint(doc);
+    if (hint) return nearestSignerRoot(hint);
+  }
+  const dialogs = dialogRoots();
+  for (const dialog of [...dialogs].reverse()) {
+    const text = `${dialog.innerText || ""}`.slice(0, 2500);
+    if (/add your signature|draw your signature|use your mouse to draw/i.test(text)) return dialog;
+  }
+  return null;
+}
+
+function findDrawSurface(scope) {
+  const canvas = largestDrawCanvas(scope);
+  if (canvas) return canvas;
+  const boxes = queryDeep(scope, "div, section, span").filter((element) => {
+    if (!isVisible(element)) return false;
+    const rect = element.getBoundingClientRect();
+    if (rect.width < 180 || rect.height < 48 || rect.height > 320) return false;
+    const bg = getComputedStyle(element).backgroundColor;
+    const match = bg.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
+    if (!match) return false;
+    const [, r, g, b] = match.map(Number);
+    return r > 220 && g > 220 && b > 220;
+  });
+  boxes.sort((a, b) => {
+    const ra = a.getBoundingClientRect();
+    const rb = b.getBoundingClientRect();
+    return rb.width * rb.height - ra.width * ra.height;
+  });
+  return boxes[0] || null;
+}
+
+function findSignaturePad() {
+  for (const doc of sameOriginFrames()) {
+    const hint = signatureDrawHint(doc);
+    if (!hint) continue;
+    const scope = nearestSignerRoot(hint);
+    const canvas = findDrawSurface(scope) || findDrawSurface(doc.body || doc);
+    if (canvas) return { scope, canvas };
+  }
+  const scope = signatureModalRoot();
+  if (scope) {
+    const canvas = findDrawSurface(scope);
+    if (canvas) return { scope, canvas };
+  }
+  return null;
+}
+
+async function waitForSignatureModal(timeoutMs = 16000) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const pad = findSignaturePad();
+    if (pad?.canvas) return pad;
+    await wait(250);
+  }
+  return null;
 }
 
 function fireCanvasPointer(canvas, type, x, y, extra = {}) {
   const rect = canvas.getBoundingClientRect();
   const clientX = rect.left + x;
   const clientY = rect.top + y;
-  const init = mouseEventInit(clientX, clientY, extra);
-  canvas.dispatchEvent(
-    new PointerEvent(type.replace("mouse", "pointer"), {
-      ...init,
-      pointerId: 1,
-      pointerType: "mouse",
-      isPrimary: true,
-      pressure: extra.buttons ? 0.5 : 0
-    })
-  );
-  canvas.dispatchEvent(new MouseEvent(type, init));
+  const buttons = extra.buttons ?? (type === "mouseup" ? 0 : 1);
+  const init = mouseEventInit(clientX, clientY, {
+    buttons,
+    pageX: clientX + window.scrollX,
+    pageY: clientY + window.scrollY,
+    movementX: extra.movementX || 0,
+    movementY: extra.movementY || 0
+  });
+  const pointerInit = {
+    ...init,
+    pointerId: 1,
+    pointerType: "mouse",
+    isPrimary: true,
+    pressure: buttons ? 0.65 : 0,
+    width: 2.5,
+    height: 2.5
+  };
+  const pointerType = type.replace("mouse", "pointer");
+  const hit = document.elementFromPoint(clientX, clientY) || canvas;
+  const targets = [canvas, hit, document, window];
+  for (const target of targets) {
+    if (!target || typeof target.dispatchEvent !== "function") continue;
+    target.dispatchEvent(new PointerEvent(pointerType, pointerInit));
+    target.dispatchEvent(new MouseEvent(type, init));
+  }
+  if (type === "mousedown") {
+    try {
+      canvas.setPointerCapture(1);
+    } catch (_error) {
+      // not all canvases allow capture on synthetic pointers
+    }
+  }
+  if (type === "mouseup") {
+    try {
+      canvas.releasePointerCapture(1);
+    } catch (_error) {
+      // already released
+    }
+  }
+}
+
+function canvasBitmapPoint(canvas, cssX, cssY) {
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = (canvas.width || rect.width) / (rect.width || 1);
+  const scaleY = (canvas.height || rect.height) / (rect.height || 1);
+  return { x: cssX * scaleX, y: cssY * scaleY };
+}
+
+function paintInk(canvas, points) {
+  if (!points.length || typeof canvas.getContext !== "function") return;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  const rect = canvas.getBoundingClientRect();
+  ctx.save();
+  ctx.strokeStyle = "#111111";
+  ctx.fillStyle = "#111111";
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  ctx.lineWidth = Math.max(2.8, ((canvas.height || rect.height) / rect.height) * 2.6);
+  ctx.beginPath();
+  const first = canvasBitmapPoint(canvas, points[0].x, points[0].y);
+  ctx.moveTo(first.x, first.y);
+  for (let i = 1; i < points.length; i += 1) {
+    const prev = canvasBitmapPoint(canvas, points[i - 1].x, points[i - 1].y);
+    const cur = canvasBitmapPoint(canvas, points[i].x, points[i].y);
+    const mid = { x: (prev.x + cur.x) / 2, y: (prev.y + cur.y) / 2 };
+    ctx.quadraticCurveTo(prev.x, prev.y, mid.x, mid.y);
+  }
+  const last = canvasBitmapPoint(canvas, points[points.length - 1].x, points[points.length - 1].y);
+  ctx.lineTo(last.x, last.y);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function parseGlyph(char) {
+  const raw = HAND_GLYPHS[char] || HAND_GLYPHS[char.toLowerCase()];
+  if (!raw) return null;
+  return raw.map((stroke) => {
+    const nums = stroke.trim().split(/\s+/).map(Number);
+    const points = [];
+    for (let i = 0; i < nums.length; i += 2) points.push({ x: nums[i], y: nums[i + 1] });
+    return points;
+  });
+}
+
+function interpolatePoints(points, spacing) {
+  const out = [];
+  for (let i = 0; i < points.length; i += 1) {
+    const cur = points[i];
+    if (!out.length) {
+      out.push(cur);
+      continue;
+    }
+    const prev = out[out.length - 1];
+    const dist = Math.hypot(cur.x - prev.x, cur.y - prev.y);
+    const steps = Math.max(1, Math.ceil(dist / spacing));
+    for (let s = 1; s <= steps; s += 1) {
+      const t = s / steps;
+      out.push({ x: prev.x + (cur.x - prev.x) * t, y: prev.y + (cur.y - prev.y) * t });
+    }
+  }
+  return out;
+}
+
+function handwrittenStrokes(name, width, height) {
+  const text = String(name || "Sign").replace(/[^A-Za-z ]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 18) || "Sign";
+  const letters = [...text];
+  const usable = width * 0.9;
+  const cell = Math.min(usable / Math.max(letters.length, 1), height * 0.85);
+  let x = width * 0.05;
+  const base = height * 0.08;
+  const strokeH = height * 0.72;
+  const italic = cell * 0.28;
+  const connected = [];
+
+  for (const char of letters) {
+    if (char === " ") {
+      x += cell * 0.4;
+      continue;
+    }
+    const glyph = parseGlyph(char) || parseGlyph("n");
+    const tall = char === char.toUpperCase() && char !== char.toLowerCase();
+    const gy = tall ? base : base + strokeH * 0.16;
+    const gh = tall ? strokeH : strokeH * 0.78;
+    const mapped = glyph.flat().map((pt) => ({
+      x: x + pt.x * cell * 0.92 + (1 - pt.y) * italic + randomBetween(-0.4, 0.4),
+      y: gy + pt.y * gh + randomBetween(-0.5, 0.5)
+    }));
+    if (connected.length && mapped.length) {
+      const from = connected[connected.length - 1];
+      connected.push(...interpolatePoints([from, mapped[0]], 2));
+    }
+    connected.push(...mapped);
+    x += cell * (char === "i" || char === "l" || char === "t" ? 0.55 : 0.78);
+  }
+
+  return [interpolatePoints(connected, 1.4)];
+}
+
+function clampPad(x, y, width, height) {
+  return {
+    x: Math.max(4, Math.min(width - 4, x)),
+    y: Math.max(4, Math.min(height - 4, y))
+  };
 }
 
 async function drawSignature(canvas, name) {
   const rect = canvas.getBoundingClientRect();
-  const width = rect.width;
-  const height = rect.height;
-  const start = { x: width * 0.12, y: height * 0.62 };
+  const width = Math.max(40, rect.width);
+  const height = Math.max(24, rect.height);
+  const strokes = handwrittenStrokes(name, width, height);
   await movePointerTo(canvas);
-  fireCanvasPointer(canvas, "mousedown", start.x, start.y, { buttons: 1 });
-  placePointer(rect.left + start.x, rect.top + start.y);
+  await wait(180);
 
-  const letters = Math.min(12, Math.max(6, (name || "sign").replace(/\s+/g, "").length));
-  let x = start.x;
-  let y = start.y;
-  for (let i = 0; i < letters; i += 1) {
-    x += width * randomBetween(0.04, 0.08);
-    y = start.y + Math.sin(i * 1.1) * height * 0.18 + randomBetween(-4, 4);
-    fireCanvasPointer(canvas, "mousemove", x, Math.max(8, Math.min(height - 8, y)), { buttons: 1 });
-    placePointer(rect.left + x, rect.top + y);
-    await wait(18);
+  for (const stroke of strokes) {
+    if (stroke.length < 2) continue;
+    const points = stroke.map((pt) => clampPad(pt.x, pt.y, width, height));
+    paintInk(canvas, points);
+    const first = points[0];
+    fireCanvasPointer(canvas, "mousedown", first.x, first.y, { buttons: 1 });
+    placePointer(rect.left + first.x, rect.top + first.y);
+    await wait(16);
+    let prev = first;
+    for (let i = 1; i < points.length; i += 1) {
+      const pt = points[i];
+      fireCanvasPointer(canvas, "mousemove", pt.x, pt.y, {
+        buttons: 1,
+        movementX: pt.x - prev.x,
+        movementY: pt.y - prev.y
+      });
+      placePointer(rect.left + pt.x, rect.top + pt.y);
+      prev = pt;
+      if (i % 3 === 0) await wait(8);
+    }
+    const last = points[points.length - 1];
+    fireCanvasPointer(canvas, "mouseup", last.x, last.y, { buttons: 0 });
+    paintInk(canvas, points);
+    await wait(50);
   }
-  fireCanvasPointer(canvas, "mouseup", x, y);
   schedulePointerHide();
 }
+
+// Compact cursive-ish strokes in a 0..1 letter cell (y grows downward).
+const HAND_GLYPHS = {
+  a: ["0.78 0.46 0.58 0.36 0.28 0.42 0.16 0.62 0.28 0.84 0.58 0.84 0.80 0.62 0.72 0.46 0.86 0.84"],
+  b: ["0.20 0.06 0.22 0.84 0.22 0.46 0.52 0.34 0.80 0.50 0.74 0.80 0.42 0.90 0.22 0.70"],
+  c: ["0.82 0.48 0.62 0.36 0.30 0.40 0.16 0.62 0.30 0.84 0.64 0.86 0.84 0.74"],
+  d: ["0.78 0.08 0.78 0.84 0.78 0.46 0.52 0.34 0.22 0.48 0.16 0.70 0.34 0.86 0.62 0.84 0.80 0.68"],
+  e: ["0.18 0.62 0.72 0.58 0.78 0.44 0.58 0.34 0.28 0.42 0.16 0.64 0.30 0.84 0.62 0.86 0.82 0.74"],
+  f: ["0.70 0.10 0.48 0.06 0.32 0.18 0.32 0.88 0.22 0.42 0.58 0.42"],
+  g: ["0.78 0.42 0.58 0.34 0.28 0.42 0.18 0.62 0.30 0.80 0.58 0.80 0.78 0.62 0.78 0.42 0.78 0.80 0.70 1.12 0.42 1.18 0.22 1.04"],
+  h: ["0.20 0.06 0.22 0.84 0.24 0.50 0.52 0.36 0.78 0.50 0.80 0.84"],
+  i: ["0.42 0.18 0.44 0.10", "0.36 0.40 0.40 0.84 0.58 0.84"],
+  j: ["0.58 0.16 0.60 0.08", "0.50 0.40 0.56 0.88 0.48 1.14 0.24 1.16 0.14 1.00"],
+  k: ["0.22 0.06 0.22 0.84", "0.70 0.36 0.24 0.58 0.78 0.86"],
+  l: ["0.38 0.06 0.32 0.84 0.50 0.86"],
+  m: ["0.10 0.84 0.14 0.42 0.30 0.36 0.42 0.52 0.44 0.84 0.46 0.48 0.64 0.34 0.78 0.52 0.80 0.84"],
+  n: ["0.16 0.84 0.20 0.42 0.40 0.34 0.62 0.48 0.66 0.84"],
+  o: ["0.50 0.36 0.22 0.46 0.14 0.66 0.32 0.86 0.66 0.82 0.84 0.62 0.72 0.40 0.50 0.36"],
+  p: ["0.22 0.36 0.20 1.16 0.22 0.48 0.50 0.34 0.78 0.48 0.70 0.76 0.40 0.84 0.22 0.68"],
+  q: ["0.76 0.42 0.56 0.34 0.26 0.44 0.16 0.64 0.30 0.82 0.58 0.80 0.76 0.62 0.76 0.42 0.78 1.16 0.92 1.08"],
+  r: ["0.20 0.84 0.24 0.44 0.46 0.36 0.72 0.46"],
+  s: ["0.76 0.44 0.56 0.32 0.28 0.40 0.34 0.56 0.64 0.62 0.74 0.78 0.48 0.90 0.18 0.80"],
+  t: ["0.40 0.08 0.38 0.80 0.52 0.86 0.68 0.78", "0.22 0.36 0.62 0.36"],
+  u: ["0.16 0.38 0.20 0.76 0.40 0.86 0.64 0.76 0.70 0.38 0.74 0.84"],
+  v: ["0.12 0.38 0.40 0.84 0.78 0.38"],
+  w: ["0.08 0.38 0.22 0.84 0.42 0.50 0.62 0.84 0.86 0.38"],
+  x: ["0.16 0.38 0.78 0.86", "0.78 0.38 0.16 0.86"],
+  y: ["0.14 0.38 0.40 0.84 0.74 0.38 0.62 0.90 0.42 1.16 0.18 1.08"],
+  z: ["0.18 0.38 0.78 0.38 0.20 0.84 0.80 0.84"],
+  A: ["0.10 0.86 0.48 0.10 0.86 0.86", "0.30 0.58 0.68 0.58"],
+  B: ["0.20 0.08 0.20 0.86 0.20 0.08 0.62 0.12 0.74 0.28 0.58 0.46 0.20 0.46 0.66 0.50 0.82 0.68 0.64 0.88 0.20 0.86"],
+  C: ["0.82 0.22 0.50 0.08 0.20 0.28 0.14 0.50 0.24 0.78 0.56 0.92 0.84 0.76"],
+  D: ["0.20 0.08 0.20 0.86 0.20 0.08 0.58 0.12 0.84 0.36 0.84 0.62 0.58 0.88 0.20 0.86"],
+  E: ["0.76 0.10 0.22 0.10 0.22 0.86 0.78 0.86", "0.22 0.48 0.62 0.48"],
+  F: ["0.22 0.86 0.22 0.10 0.78 0.10", "0.22 0.48 0.60 0.48"],
+  G: ["0.82 0.24 0.52 0.08 0.22 0.28 0.14 0.52 0.26 0.80 0.58 0.92 0.86 0.70 0.86 0.54 0.56 0.54"],
+  H: ["0.20 0.08 0.20 0.86", "0.78 0.08 0.78 0.86", "0.20 0.48 0.78 0.48"],
+  I: ["0.28 0.10 0.70 0.10", "0.50 0.10 0.50 0.86", "0.28 0.86 0.70 0.86"],
+  J: ["0.30 0.10 0.78 0.10", "0.62 0.10 0.62 0.74 0.46 0.90 0.22 0.80"],
+  K: ["0.22 0.08 0.22 0.86", "0.78 0.10 0.24 0.48 0.82 0.86"],
+  L: ["0.24 0.08 0.24 0.86 0.80 0.86"],
+  M: ["0.10 0.86 0.14 0.10 0.48 0.58 0.82 0.10 0.88 0.86"],
+  N: ["0.18 0.86 0.18 0.10 0.80 0.86 0.80 0.10"],
+  O: ["0.50 0.08 0.20 0.22 0.10 0.50 0.22 0.80 0.50 0.92 0.80 0.78 0.90 0.48 0.78 0.20 0.50 0.08"],
+  P: ["0.22 0.86 0.22 0.08 0.62 0.08 0.80 0.24 0.70 0.46 0.22 0.48"],
+  Q: ["0.50 0.08 0.20 0.22 0.10 0.50 0.22 0.80 0.50 0.92 0.80 0.78 0.90 0.48 0.78 0.20 0.50 0.08", "0.56 0.68 0.86 0.94"],
+  R: ["0.22 0.86 0.22 0.08 0.62 0.08 0.80 0.24 0.68 0.46 0.22 0.48 0.50 0.50 0.82 0.86"],
+  S: ["0.78 0.22 0.52 0.08 0.22 0.20 0.28 0.40 0.62 0.50 0.80 0.68 0.58 0.92 0.22 0.80"],
+  T: ["0.14 0.10 0.86 0.10", "0.50 0.10 0.50 0.86"],
+  U: ["0.16 0.10 0.18 0.68 0.36 0.88 0.64 0.88 0.82 0.68 0.84 0.10"],
+  V: ["0.10 0.10 0.48 0.86 0.88 0.10"],
+  W: ["0.06 0.10 0.26 0.86 0.48 0.36 0.70 0.86 0.92 0.10"],
+  X: ["0.14 0.10 0.84 0.86", "0.84 0.10 0.14 0.86"],
+  Y: ["0.12 0.10 0.50 0.48 0.88 0.10", "0.50 0.48 0.50 0.86"],
+  Z: ["0.16 0.10 0.84 0.10 0.16 0.86 0.86 0.86"]
+};
 
 function findActionButton(root, patterns) {
   const buttons = queryDeep(root, "button, [role='button'], a, input[type='submit'], input[type='button']").filter(isVisible);
@@ -614,6 +928,7 @@ async function clickIfPresent(root, patterns) {
 
 const START_PATTERNS = [/get started/, /start signing/, /review (and|&) sign/, /i agree to (the )?terms/, /continue to sign/];
 const CONFIRM_PATTERNS = [
+  /^submit document$/,
   /^i agree$/,
   /^agree$/,
   /^accept$/,
@@ -624,32 +939,96 @@ const CONFIRM_PATTERNS = [
   /^submit$/,
   /^finish$/
 ];
-const INSERT_PATTERNS = [/^insert$/, /^insert signature$/, /^type$/, /^save$/, /^use signature$/];
+const INSERT_PATTERNS = [/^insert$/, /^insert signature$/, /^save$/, /^use signature$/, /^add full name$/, /^add full address$/];
+const ADD_SIGNATURE_CONFIRM = [/^add signature$/, /^insert signature$/, /^insert$/, /^save$/, /^use signature$/];
+
+function looksLikeHelloSignSteps(root = document) {
+  if (requiredStepButtons(root).length) return true;
+  if (findChecklistButton(root, "signature")) return true;
+  const text = (root.innerText || "").slice(0, 8000);
+  return /complete these steps|\+ add (signature|full name|full address)|add your signature|use your mouse to draw/i.test(text);
+}
 
 function looksLikeSignerUi(root = document) {
+  if (looksLikeHelloSignSteps(root)) return true;
   if (signatureTargets(root).length) return true;
   if (signatureCanvas(root)) return true;
-  if (findField(root, "name") || findField(root, "address")) return true;
-  if (requiredStepButtons(root).length) return true;
-  const text = (root.innerText || "").slice(0, 8000);
-  return /your name goes here|click to sign|please sign|type your name|complete these steps|\+ add (signature|full name|full address)/i.test(text);
+  return false;
+}
+
+function stepButtonPatterns(kind) {
+  if (kind === "signature") return [/^\+\s*add signature$/, /^add signature$/];
+  if (kind === "name") return [/^\+\s*add full name$/, /^add full name$/, /^full name$/];
+  return [/^\+\s*add full address$/, /^add full address$/, /^full address$/];
+}
+
+function findChecklistButton(root, kind, preferPlus = true) {
+  const patterns = stepButtonPatterns(kind);
+  const scopes =
+    !root || root === document || root === document.documentElement || root === document.body
+      ? sameOriginFrames()
+      : [root];
+  const nodes = scopes
+    .flatMap((scope) => queryDeep(scope, "a, button, [role='button'], [role='link'], div, span"))
+    .filter((element) => {
+    if (!isVisible(element)) return false;
+    const text = normalizedText(element);
+    if (text.length >= 40) return false;
+    if (!patterns.some((pattern) => pattern.test(text))) return false;
+    const around = `${element.closest("[role='dialog'], [aria-modal='true']")?.innerText || ""}`.slice(0, 800);
+    if (kind === "signature" && /add your signature|draw your signature|use your mouse to draw/i.test(around) && /^add signature$/.test(text)) {
+      return false;
+    }
+    return true;
+  });
+  const unique = nodes.filter((element) => !nodes.some((other) => other !== element && element.contains(other)));
+  const plus = unique.find((element) => normalizedText(element).startsWith("+"));
+  const plain = unique.find((element) => !normalizedText(element).startsWith("+"));
+  if (preferPlus) return plus || plain || unique[0] || null;
+  return plain || plus || unique[0] || null;
 }
 
 function requiredStepButtons(root) {
-  const nodes = queryDeep(root, "a, button, [role='button'], [role='link'], div, span, td");
-  const matches = nodes.filter((element) => {
-    if (!isVisible(element)) return false;
-    const text = normalizedText(element);
-    return text.length < 40 && /^\+?\s*add (signature|full name|full address)$/i.test(text);
-  });
-  return matches.filter((element) => !matches.some((other) => other !== element && element.contains(other)));
+  return ["signature", "name", "address"].map((kind) => findChecklistButton(root, kind)).filter(Boolean);
 }
 
-function stepKind(text) {
-  if (/signature/i.test(text)) return "signature";
-  if (/address/i.test(text)) return "address";
-  if (/name/i.test(text)) return "name";
-  return "name";
+function isEditableNode(element) {
+  if (!element || !element.isConnected) return false;
+  if (element.isContentEditable) return true;
+  if (element.tagName === "TEXTAREA") return true;
+  if (element.tagName !== "INPUT") return false;
+  const type = (element.type || "text").toLowerCase();
+  return !["hidden", "checkbox", "radio", "submit", "button", "file", "image"].includes(type);
+}
+
+function findYellowPlaceholder(root, kind) {
+  const hint =
+    kind === "address"
+      ? /your full address goes here|full address goes here|address goes here/i
+      : /your (full )?name goes here|name goes here|click to type your name/i;
+  const labeled = queryDeep(root, "div, span, p, label, td, [role='tooltip'], [class*='tip'], [class*='Tip']").filter(
+    (element) => isVisible(element) && hint.test(normalizedText(element)) && normalizedText(element).length < 90
+  );
+  for (const label of labeled) {
+    const parent = label.parentElement;
+    const nearby = [label.previousElementSibling, label.nextElementSibling, parent, parent?.previousElementSibling, ...(parent ? [...parent.children] : [])].filter(
+      Boolean
+    );
+    const yellow = nearby.find((element) => isYellowish(element) && element.getBoundingClientRect().width >= 80);
+    if (yellow) return yellow;
+    const box = nearby.find((element) => {
+      const rect = element.getBoundingClientRect();
+      return rect.width >= 100 && rect.height >= 28 && rect.height < 280 && element !== label;
+    });
+    if (box) return box;
+    return label;
+  }
+  const yellows = queryDeep(root, "div, span, td, canvas, [class*='field'], [class*='Field']").filter((element) => {
+    if (!isVisible(element) || !isYellowish(element)) return false;
+    const rect = element.getBoundingClientRect();
+    return rect.width >= 80 && rect.height >= 24 && rect.height < 280;
+  });
+  return yellows[0] || null;
 }
 
 async function waitForPopupField(timeoutMs = 6000) {
@@ -674,50 +1053,142 @@ async function confirmPopup(scope) {
   await wait(400);
 }
 
+async function confirmSignatureModal(scope) {
+  const button = findActionButton(scope, ADD_SIGNATURE_CONFIRM);
+  if (!button) return false;
+  await humanClick(button);
+  button.click();
+  await wait(700);
+  return true;
+}
+
+async function typeIntoAny(element, value) {
+  if (!element || !value) return false;
+  await humanClick(element);
+  element.click();
+  await wait(350);
+  const start = Date.now();
+  while (Date.now() - start < 2500) {
+    const active = document.activeElement;
+    const field =
+      (isEditableNode(active) && active) ||
+      queryDeep(document, "input:not([type='hidden']):not([type='checkbox']):not([type='radio']), textarea, [contenteditable='true']").find(
+        (candidate) => isVisible(candidate) && isEditableNode(candidate)
+      );
+    if (field) {
+      if (field.tagName === "INPUT" || field.tagName === "TEXTAREA") await typeIntoField(field, value);
+      else await typeLikeHuman(field, value, "3");
+      return true;
+    }
+    await wait(200);
+  }
+  if (element.isContentEditable) {
+    await typeLikeHuman(element, value, "3");
+    return true;
+  }
+  return false;
+}
+
+async function waitForTypedEditor(root, kind, timeoutMs = 6000) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const dialog = dialogRoots().slice(-1)[0];
+    const scope = dialog || root;
+    const field =
+      findField(scope, kind) ||
+      queryDeep(scope, "input:not([type='hidden']):not([type='checkbox']):not([type='radio']), textarea, [contenteditable='true']").find(
+        (element) => isVisible(element) && isEditableNode(element)
+      );
+    if (field) return { scope, field };
+    if (isEditableNode(document.activeElement)) return { scope, field: document.activeElement };
+    const yellow = findYellowPlaceholder(root, kind);
+    if (yellow) return { scope: root, field: yellow };
+    await wait(200);
+  }
+  return { scope: root };
+}
+
+async function clickChecklistButton(root, kind, preferPlus = true) {
+  const button = findChecklistButton(root, kind, preferPlus);
+  if (!button) return false;
+  await humanClick(button);
+  await wait(900);
+  return true;
+}
+
+async function fillNameOrAddressStep(root, kind, value) {
+  const opened = await clickChecklistButton(root, kind, true);
+  if (!opened) return false;
+  const editor = await waitForTypedEditor(root, kind, 6000);
+  if (value && editor.field) await typeIntoAny(editor.field, value);
+  await wait(400);
+  const again = findChecklistButton(root, kind, false);
+  if (again) {
+    await humanClick(again);
+    again.click();
+    await wait(600);
+  } else {
+    await confirmPopup(editor.scope || root);
+  }
+  return Boolean(value && editor.field);
+}
+
+async function clickSubmitDocument(root, timeoutMs = 12000) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const buttons = queryDeep(root, "button, [role='button'], a, input[type='submit'], input[type='button'], div").filter((element) => {
+      if (!isVisible(element)) return false;
+      const text = normalizedText(element);
+      return text.length < 40 && /^submit( document)?$/.test(text);
+    });
+    const unique = buttons.filter((element) => !buttons.some((other) => other !== element && element.contains(other)));
+    const enabled =
+      unique.find((element) => !isDisabled(element) && /^submit document$/.test(normalizedText(element))) ||
+      unique.find((element) => !isDisabled(element));
+    if (enabled) {
+      await humanClick(enabled);
+      enabled.click();
+      await wait(900);
+      return true;
+    }
+    await wait(400);
+  }
+  return false;
+}
+
 async function completeRequiredSteps(root, signerName, signerAddress) {
   let filledName = false;
   let filledAddress = false;
   let drew = false;
-  const seen = new Set();
 
-  for (let round = 0; round < 6; round += 1) {
-    const buttons = requiredStepButtons(root);
-    const next = buttons.find((button) => !seen.has(normalizedText(button)));
-    if (!next) break;
-    const kind = stepKind(normalizedText(next));
-    seen.add(normalizedText(next));
-    await humanClick(next);
-    next.click();
-    await wait(500);
-    const popup = await waitForPopupField();
-    const value = kind === "address" ? signerAddress : signerName;
-    if (kind === "signature") {
-      const canvas = popup.canvas || signatureCanvas(popup.scope);
-      const typeTab = findActionButton(popup.scope, [/^type$/, /^keyboard$/]);
-      if (typeTab) {
-        await humanClick(typeTab);
-        typeTab.click();
-        await wait(300);
-      }
-      const field = popup.field || findField(popup.scope, "name");
-      if (field && signerName) {
-        await typeIntoField(field, signerName);
-        filledName = true;
-      } else if (canvas && signerName) {
-        await drawSignature(canvas, signerName);
-        drew = true;
-      }
-    } else if (value) {
-      const field = popup.field || findField(popup.scope, kind);
-      if (field) {
-        await typeIntoField(field, value);
-        if (kind === "address") filledAddress = true;
-        else filledName = true;
-      }
-    }
-    await confirmPopup(popup.scope);
+  let pad = findSignaturePad();
+  if (!pad?.canvas && findChecklistButton(root, "signature")) {
+    await clickChecklistButton(root, "signature", true);
+    pad = await waitForSignatureModal(16000);
   }
-  return { filledName, filledAddress, drew };
+  if (!pad?.canvas && findChecklistButton(root, "signature")) {
+    await clickChecklistButton(root, "signature", true);
+    pad = await waitForSignatureModal(8000);
+  }
+  if (pad?.canvas && signerName) {
+    await drawSignature(pad.canvas, signerName);
+    drew = true;
+    await confirmSignatureModal(pad.scope);
+    await wait(700);
+  }
+
+  if (findChecklistButton(root, "name")) {
+    await clickChecklistButton(root, "name", true);
+    filledName = true;
+    await wait(700);
+  }
+
+  if (signerAddress && findChecklistButton(root, "address")) {
+    filledAddress = await fillNameOrAddressStep(root, "address", signerAddress);
+  }
+
+  const signed = await clickSubmitDocument(root);
+  return { filledName, filledAddress, drew, signed };
 }
 
 async function fillAgreementForm(root, signerName, signerAddress) {
@@ -729,55 +1200,22 @@ async function fillAgreementForm(root, signerName, signerAddress) {
   let filledName = steps.filledName;
   let filledAddress = steps.filledAddress;
   let drew = steps.drew;
+  let signed = steps.signed;
 
-  const nameField = findField(root, "name");
-  if (nameField && signerName && (nameField.value || nameField.textContent || "").trim() !== signerName) {
-    await typeIntoField(nameField, signerName);
-    filledName = true;
+  if (!filledName) {
+    filledName = Boolean(findChecklistButton(root, "name") === null && drew);
   }
 
-  const addressField = findField(root, "address");
-  if (addressField && signerAddress && (addressField.value || addressField.textContent || "").trim() !== signerAddress) {
-    await typeIntoField(addressField, signerAddress);
-    filledAddress = true;
-  }
-
-  const boxes = signatureTargets(root);
-  for (const box of boxes) {
-    const label = normalizedText(box);
-    await humanClick(box);
-    await wait(500);
-    const active = document.activeElement;
-    const wantsAddress = /address|street|city/i.test(label) && signerAddress;
-    const value = wantsAddress ? signerAddress : signerName;
-    if (value && active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.isContentEditable)) {
-      await typeIntoField(active, value);
-      if (wantsAddress) filledAddress = true;
-      else filledName = true;
-    } else if (value) {
-      const popup = dialogRoots().pop() || root;
-      const field = findField(popup, wantsAddress ? "address" : "name");
-      if (field) {
-        await typeIntoField(field, value);
-        if (wantsAddress) filledAddress = true;
-        else filledName = true;
-      }
-    }
-    await clickIfPresent(root, INSERT_PATTERNS);
-    const canvas = signatureCanvas(root);
-    if (canvas && signerName) {
-      await drawSignature(canvas, signerName);
-      drew = true;
+  if (!filledAddress) {
+    const addressField = findField(root, "address");
+    if (addressField && signerAddress && (addressField.value || addressField.textContent || "").trim() !== signerAddress) {
+      await typeIntoField(addressField, signerAddress);
+      filledAddress = true;
     }
   }
 
-  const canvas = signatureCanvas(root);
-  if (canvas && signerName && !drew) {
-    await drawSignature(canvas, signerName);
-    drew = true;
-  }
-
-  const signed = await clickIfPresent(root, CONFIRM_PATTERNS);
+  if (!signed) signed = await clickSubmitDocument(root);
+  if (!signed) signed = await clickIfPresent(root, CONFIRM_PATTERNS);
   return { filledName, filledAddress, signed, drew };
 }
 
@@ -799,21 +1237,16 @@ function nearestSignerRoot(element) {
   return document.body;
 }
 
-async function waitForAgreementUi(timeoutMs = 15000) {
+async function waitForAgreementUi(timeoutMs = 20000) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     if (signerIframes().length) return { kind: "iframe", node: signerIframes()[0] };
-    const dialogs = dialogRoots();
-    if (dialogs.length) {
-      const withUi = dialogs.reverse().find((dialog) => looksLikeSignerUi(dialog)) || dialogs[dialogs.length - 1];
-      return { kind: "dialog", node: withUi };
-    }
-    if (looksLikeSignerUi(document)) {
+    if (looksLikeHelloSignSteps(document)) {
       const box = signatureTargets(document)[0];
       return { kind: "page", node: box ? nearestSignerRoot(box) : document.body };
     }
     const stored = await chrome.storage.local.get(["agreementFrameResult"]);
-    if (stored.agreementFrameResult && Date.now() - stored.agreementFrameResult.at < 20000) {
+    if (stored.agreementFrameResult && Date.now() - stored.agreementFrameResult.at < 25000) {
       return { kind: "frame-done", node: null, result: stored.agreementFrameResult };
     }
     await wait(350);
@@ -863,48 +1296,56 @@ function describeFill(kind, filled) {
   }`;
 }
 
+async function fillSignerPage(signerName, signerAddress) {
+  await setPendingSigner({ signerName, signerAddress });
+  const start = Date.now();
+  while (Date.now() - start < 22000) {
+    if (looksLikeHelloSignSteps(document) || looksLikeSignerUi(document)) {
+      const filled = await fillAgreementForm(document, signerName, signerAddress);
+      const note = describeFill("nda-tab", filled);
+      await chrome.storage.local.set({
+        agreementFrameResult: { ok: Boolean(filled.signed || filled.drew || filled.filledName), note, at: Date.now() }
+      });
+      return { agreements: note, ...filled };
+    }
+    if (signerIframes().length) {
+      const frame = await waitForFrameSigner(28000);
+      return { agreements: frame?.note || "signed in embedded window", frame };
+    }
+    await clickIfPresent(document, START_PATTERNS);
+    await wait(400);
+  }
+  throw new Error("Opened the NDA tab, but + Add Signature / Full Name / Address was not found.");
+}
+
 async function signAgreements({ signerName, signerAddress, enabled }) {
   if (!enabled) return "skipped";
-  const links = unsignedAgreementLinks();
-  if (!links.length) {
-    if (looksLikeSignerUi(document) || signerIframes().length) {
-      await setPendingSigner({ signerName, signerAddress });
-      const filled = looksLikeSignerUi(document) ? await fillAgreementForm(document, signerName, signerAddress) : null;
-      const frame = await waitForFrameSigner(18000);
-      await clearPendingSigner();
-      if (filled?.signed || filled?.filledName) return describeFill("agreement", filled);
-      if (frame) return `agreement: ${frame.note || "signed in embedded window"}`;
-    }
-    return "none required";
+  if (looksLikeHelloSignSteps(document) || looksLikeSignerUi(document) || signerIframes().length) {
+    const filled = await fillSignerPage(signerName, signerAddress);
+    return filled.agreements || "signed";
   }
-  if (!signerName) return "needed: fill Full legal name in the side panel";
+  return "none required";
+}
 
-  const results = [];
-  for (const link of links) {
-    const kind = agreementKindOf(normalizedText(link)) || normalizedText(link).slice(0, 24);
-    await setPendingSigner({ signerName, signerAddress, kind });
-    await humanClick(link);
-    const ui = await waitForAgreementUi();
-    if (!ui) {
-      results.push(`${kind}: opened but no form appeared`);
-      continue;
-    }
-    let filled = null;
-    if (ui.kind === "iframe" || ui.kind === "frame-done") {
-      const frame = ui.result || (await waitForFrameSigner(18000));
-      results.push(frame ? `${kind}: ${frame.note || "signed in embedded window"}` : `${kind}: sign window opened, waiting for fields`);
-    } else {
-      filled = await fillAgreementForm(ui.node, signerName, signerAddress);
-      await wait(600);
-      if (dialogRoots().includes(ui.node) && isVisible(ui.node) && !filled.signed) {
-        await closeAgreementUi(ui.node);
-      }
-      results.push(describeFill(kind, filled));
-    }
-    await wait(500);
-  }
-  await clearPendingSigner();
-  return results.join("; ") || "none required";
+function serializeAgreementLink(link) {
+  return {
+    kind: agreementKindOf(normalizedText(link)) || "agreement",
+    text: normalizedText(link),
+    href: link.href || link.getAttribute("href") || "",
+    target: link.getAttribute("target") || ""
+  };
+}
+
+function listAgreements() {
+  return findAgreementEntryLinks().map(serializeAgreementLink);
+}
+
+async function clickAgreementOnce(kind) {
+  const links = findAgreementEntryLinks();
+  const link = kind ? links.find((item) => agreementKindOf(normalizedText(item)) === kind) || links[0] : links[0];
+  if (!link) return { clicked: false };
+  await humanClick(link);
+  return { clicked: true, ...serializeAgreementLink(link) };
 }
 
 async function fillEmbeddedAgreement(signerName, signerAddress) {
@@ -924,24 +1365,31 @@ async function fillEmbeddedAgreement(signerName, signerAddress) {
 
 let embedWatching = false;
 let embedBusy = false;
+async function tryEmbeddedSigner() {
+  if (IS_TOP || embedBusy || !looksLikeHelloSignSteps(document)) return;
+  const stored = await chrome.storage.local.get(["pendingAgreementSign", "agreementFrameResult"]);
+  if (stored.agreementFrameResult && Date.now() - stored.agreementFrameResult.at < 20000) return;
+  if (!stored.pendingAgreementSign || Date.now() - stored.pendingAgreementSign.at > 90000) return;
+  embedBusy = true;
+  try {
+    await fillEmbeddedAgreement(stored.pendingAgreementSign.signerName, stored.pendingAgreementSign.signerAddress);
+  } catch (error) {
+    await chrome.storage.local.set({
+      agreementFrameResult: { ok: false, note: error.message, at: Date.now() }
+    });
+  }
+  embedBusy = false;
+}
+
 async function watchEmbeddedSigner() {
   if (IS_TOP || embedWatching) return;
   embedWatching = true;
-  setInterval(async () => {
-    if (embedBusy || !looksLikeSignerUi(document)) return;
-    const stored = await chrome.storage.local.get(["pendingAgreementSign", "agreementFrameResult"]);
-    if (stored.agreementFrameResult && Date.now() - stored.agreementFrameResult.at < 20000) return;
-    if (!stored.pendingAgreementSign || Date.now() - stored.pendingAgreementSign.at > 60000) return;
-    embedBusy = true;
-    try {
-      await fillEmbeddedAgreement(stored.pendingAgreementSign.signerName, stored.pendingAgreementSign.signerAddress);
-    } catch (error) {
-      await chrome.storage.local.set({
-        agreementFrameResult: { ok: false, note: error.message, at: Date.now() }
-      });
-    }
-    embedBusy = false;
-  }, 1200);
+  chrome.storage.onChanged.addListener((changes) => {
+    if (changes.pendingAgreementSign?.newValue) void tryEmbeddedSigner();
+  });
+  setInterval(() => {
+    void tryEmbeddedSigner();
+  }, 800);
 }
 
 watchEmbeddedSigner();
@@ -1024,8 +1472,17 @@ async function waitForBidInput(timeoutMs = 15000) {
 
 function detectNda() {
   const links = unsignedAgreementLinks();
-  const text = (document.body?.innerText || "").slice(0, 20000);
-  const banner = /you must sign/i.test(text) && /(non[-\s]?disclosure|\bnda\b|ip agreement|intellectual property)/i.test(text);
+  const text = (document.body?.innerText || "").slice(0, 25000);
+  const signerOpen =
+    signerIframes().length > 0 ||
+    Boolean(findChecklistButton(document, "signature")) ||
+    /complete these steps|\+ add signature|add your signature|your name goes here|your full address goes here/i.test(text);
+  const mustSign =
+    /you must sign|please sign (the |this )?(nda|n\.?d\.?a|agreement)|sign to (view|bid|continue|unlock)|before you can (place a )?bid/i.test(
+      text
+    );
+  const ndaMention = /(non[-\s]?disclosure|\bnda\b|ip agreement|intellectual property)/i.test(text);
+  const needsSign = links.length > 0 || signerOpen || (mustSign && ndaMention);
   const kinds = [
     ...new Set(
       links
@@ -1033,30 +1490,115 @@ function detectNda() {
         .filter(Boolean)
     )
   ];
-  if (banner && !kinds.length) kinds.push("nda");
-  return { nda: links.length > 0 || banner, kinds };
+  if (needsSign && !kinds.length) kinds.push(signerOpen ? "agreement" : "nda");
+  return {
+    nda: needsSign,
+    bidReady: Boolean(findBidInput()) && !needsSign,
+    hasBidForm: Boolean(findBidInput()),
+    kinds
+  };
 }
 
-async function fillBid({ draft, autoSubmit, humanTyping, typingSpeed, sealedBid, signAgreements: shouldSign, signerName, signerAddress }) {
+function findBidTermField(kind) {
+  const inputs = queryDeep(
+    document,
+    "input:not([type='hidden']):not([type='checkbox']):not([type='radio']):not([type='button']):not([type='submit']), [contenteditable='true']"
+  ).filter((element) => isVisible(element) && element.tagName !== "TEXTAREA");
+  let best = null;
+  let bestScore = 0;
+  for (const input of inputs) {
+    const bits = [
+      input.getAttribute("name"),
+      input.id,
+      input.getAttribute("placeholder"),
+      input.getAttribute("aria-label"),
+      input.getAttribute("data-testid"),
+      input.closest("label")?.textContent,
+      input.previousElementSibling?.textContent,
+      input.parentElement?.innerText?.slice(0, 140)
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase()
+      .replace(/\s+/g, " ");
+    let score = 0;
+    if (kind === "amount") {
+      if (/bid amount|\bamount\b|bid.?price|hourly rate/.test(bits)) score += 8;
+      if (/\$|usd|currency|budget|\/hr|hourly/.test(bits)) score += 2;
+      if (/paid to you|fee/.test(bits)) score += 1;
+      if (/deliver|period|days|duration|proposal|profile/.test(bits)) score -= 6;
+    } else {
+      if (/delivered in|delivery|period|duration|\bdays\b/.test(bits)) score += 8;
+      if (/this project will be delivered/.test(bits)) score += 4;
+      if (/amount|budget|\$|proposal|profile/.test(bits)) score -= 6;
+    }
+    if (score > bestScore) {
+      best = input;
+      bestScore = score;
+    }
+  }
+  return bestScore > 0 ? best : null;
+}
+
+async function fillShortField(element, value) {
+  await humanClick(element);
+  element.focus({ preventScroll: true });
+  if (typeof element.select === "function") element.select();
+  setNativeValue(element, "");
+  await wait(80);
+  setNativeValue(element, value);
+  element.dispatchEvent(new Event("change", { bubbles: true }));
+  element.dispatchEvent(new FocusEvent("blur", { bubbles: true }));
+}
+
+async function fillBidTerms(bidAmount, bidDeadlineDays) {
+  const notes = [];
+  const amount = String(bidAmount || "").trim();
+  const days = String(bidDeadlineDays || "").trim();
+  if (amount) {
+    const field = findBidTermField("amount");
+    if (!field) notes.push("amount field not found");
+    else {
+      await fillShortField(field, amount);
+      notes.push(`amount ${amount}`);
+    }
+  }
+  if (days) {
+    const field = findBidTermField("days");
+    if (!field) notes.push("deadline field not found");
+    else {
+      await fillShortField(field, days.replace(/[^\d]/g, "") || days);
+      notes.push(`deadline ${days} days`);
+    }
+  }
+  return notes.join(", ") || "unchanged";
+}
+
+async function fillBid({ draft, autoSubmit, humanTyping, typingSpeed, sealedBid, signAgreements: shouldSign, signerName, signerAddress, bidAmount, bidDeadlineDays }) {
   if (!draft) {
     throw new Error("No draft text to fill.");
   }
-  const agreements =
-    shouldSign === false
-      ? "skipped"
-      : await signAgreements({
-          enabled: true,
-          signerName: (signerName || "").trim(),
-          signerAddress: (signerAddress || "").trim()
-        });
-  if (agreements.startsWith("needed:")) {
-    throw new Error(agreements);
+
+  const gate = detectNda();
+  let agreements = "none required";
+  if (shouldSign !== false && (looksLikeHelloSignSteps(document) || looksLikeSignerUi(document))) {
+    agreements = await signAgreements({
+      enabled: true,
+      signerName: (signerName || "").trim(),
+      signerAddress: (signerAddress || "").trim()
+    });
+    if (typeof agreements === "string" && agreements.startsWith("needed:")) {
+      throw new Error(agreements);
+    }
   }
 
-  const bidInput = await waitForBidInput();
+  const bidInput = await waitForBidInput(gate.nda ? 20000 : 15000);
   if (!bidInput) {
     throw new Error("Could not find the bid proposal field (skipped Clarification Board).");
   }
+
+  const terms = await fillBidTerms(bidAmount, bidDeadlineDays);
+
   await humanClick(bidInput);
   if (humanTyping) {
     await typeLikeHuman(bidInput, draft, typingSpeed);
@@ -1076,7 +1618,7 @@ async function fillBid({ draft, autoSubmit, humanTyping, typingSpeed, sealedBid,
 
   const submitButton = await waitForSubmitButton(bidInput, autoSubmit ? 10000 : 2000);
   if (!autoSubmit) {
-    return { submitClicked: false, submitFound: Boolean(submitButton), submitTarget: describeElement(submitButton), sealed, registered, agreements };
+    return { submitClicked: false, submitFound: Boolean(submitButton), submitTarget: describeElement(submitButton), sealed, registered, agreements, terms };
   }
   if (!submitButton) {
     throw new Error("Bid typed, but the Place Bid button was not found on the page.");
@@ -1086,7 +1628,7 @@ async function fillBid({ draft, autoSubmit, humanTyping, typingSpeed, sealedBid,
   }
   await wait(randomBetween(700, 1800));
   const submit = await pressSubmit(submitButton, bidInput, draft);
-  return { submitClicked: true, submitFound: true, sealed, registered, agreements, ...submit };
+  return { submitClicked: true, submitFound: true, sealed, registered, agreements, terms, ...submit };
 }
 
 // ----- making the page's form notice the typed text -----
@@ -1250,12 +1792,15 @@ async function pressSubmit(button, bidInput, draft) {
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  if (!IS_TOP && (message?.type === "EXTRACT_PROJECT" || message?.type === "FILL_BID" || message?.type === "DETECT_NDA" || message?.type === "SIGN_AGREEMENTS")) {
+  if (!IS_TOP && (message?.type === "EXTRACT_PROJECT" || message?.type === "FILL_BID" || message?.type === "DETECT_NDA" || message?.type === "SIGN_AGREEMENTS" || message?.type === "LIST_AGREEMENTS" || message?.type === "CLICK_AGREEMENT" || message?.type === "FILL_SIGNER_PAGE")) {
     return false;
   }
   const handlers = {
     EXTRACT_PROJECT: async () => ({ project: await extractWhenReady() }),
     DETECT_NDA: async () => detectNda(),
+    LIST_AGREEMENTS: async () => ({ agreements: listAgreements() }),
+    CLICK_AGREEMENT: () => clickAgreementOnce(message.kind),
+    FILL_SIGNER_PAGE: () => fillSignerPage((message.signerName || "").trim(), (message.signerAddress || "").trim()),
     SIGN_AGREEMENTS: () =>
       signAgreements({
         enabled: true,

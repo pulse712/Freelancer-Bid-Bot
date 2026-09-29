@@ -21,6 +21,7 @@ const CHECKBOXES = { autoSubmit: "autoSubmit", sealedBid: "sealedBid", humanTypi
 
 let loadedModels = [];
 let modelsRequestId = 0;
+let budgetRules = BidBotBudget.DEFAULT_RULES.map((rule) => ({ ...rule }));
 
 function setStatus(text, kind = "") {
   statusEl.textContent = text;
@@ -137,7 +138,8 @@ async function loadSettings() {
     ...Object.keys(CHECKBOXES),
     "aiModel",
     "automationEnabled",
-    "lastDraft"
+    "lastDraft",
+    "budgetRules"
   ]);
   for (const [key, id] of Object.entries(TEXT_FIELDS)) {
     if (stored[key] !== undefined) $(id).value = stored[key];
@@ -153,6 +155,8 @@ async function loadSettings() {
     "Placeholders filled from the project: " + BidBotAI.PLACEHOLDERS.map((name) => `{${name}}`).join(" ");
   $("autoStatus").textContent = stored.automationEnabled ? AUTO_ON_TEXT : AUTO_OFF_TEXT;
   $("draftOutput").value = stored.lastDraft || "";
+  budgetRules = BidBotBudget.coerceRules(stored.budgetRules);
+  renderBudgetRules();
   updateNameBadge();
   renderModelOptions(stored.aiModel || "");
   if ($("aiProvider").value && $("aiApiKey").value) loadModels();
@@ -167,8 +171,88 @@ async function saveSettings() {
   for (const [key, id] of Object.entries(CHECKBOXES)) {
     data[key] = $(id).checked;
   }
+  data.budgetRules = readBudgetRulesFromDom();
+  budgetRules = BidBotBudget.coerceRules(data.budgetRules);
   await chrome.storage.local.set(data);
   updateNameBadge();
+}
+
+function ruleInput(name, value, placeholder) {
+  const input = document.createElement("input");
+  input.type = "text";
+  input.inputMode = "decimal";
+  input.dataset.field = name;
+  input.value = value === "" || value == null ? "" : String(value);
+  input.placeholder = placeholder;
+  input.addEventListener("change", saveSettings);
+  return input;
+}
+
+function renderRuleRow(rule) {
+  const row = document.createElement("div");
+  row.className = `rule-row ${rule.type}`;
+  row.dataset.id = rule.id;
+  row.dataset.type = rule.type;
+  row.append(ruleInput("min", rule.min, "min"), Object.assign(document.createElement("span"), { className: "dash", textContent: "~" }), ruleInput("max", rule.max, "max"), Object.assign(document.createElement("span"), { className: "arrow", textContent: "→" }), ruleInput("bid", rule.bid, rule.type === "hourly" ? "$/hr" : "bid"));
+  if (rule.type === "fixed") {
+    row.append(ruleInput("days", rule.days, "days"));
+  }
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "rule-remove";
+  remove.title = "Remove this range";
+  remove.textContent = "×";
+  remove.addEventListener("click", () => {
+    budgetRules = readBudgetRulesFromDom().filter((item) => item.id !== rule.id);
+    renderBudgetRules();
+    saveSettings();
+  });
+  row.append(remove);
+  return row;
+}
+
+function renderBudgetRules() {
+  const fixed = $("fixedRules");
+  const hourly = $("hourlyRules");
+  fixed.textContent = "";
+  hourly.textContent = "";
+  for (const rule of budgetRules) {
+    (rule.type === "hourly" ? hourly : fixed).append(renderRuleRow(rule));
+  }
+}
+
+function readBudgetRulesFromDom() {
+  return [...document.querySelectorAll(".rule-row")].map((row) => {
+    const valueOf = (name) => row.querySelector(`[data-field="${name}"]`)?.value.trim() || "";
+    return {
+      id: row.dataset.id,
+      type: row.dataset.type,
+      min: valueOf("min"),
+      max: valueOf("max"),
+      bid: valueOf("bid"),
+      days: valueOf("days")
+    };
+  });
+}
+
+function addBudgetRule(type) {
+  const current = readBudgetRulesFromDom();
+  const last = [...current].reverse().find((rule) => rule.type === type);
+  const lastMax = Number(last?.max);
+  const lastBid = Number(last?.bid);
+  budgetRules = [
+    ...current,
+    {
+      id: BidBotBudget.newRuleId(),
+      type,
+      min: Number.isFinite(lastMax) ? lastMax : type === "hourly" ? 15 : 30,
+      max: Number.isFinite(lastMax) ? lastMax * 2 : type === "hourly" ? 25 : 250,
+      bid: Number.isFinite(lastBid) ? lastBid : type === "hourly" ? 20 : 120,
+      days: type === "hourly" ? "" : last?.days || 1
+    }
+  ];
+  renderBudgetRules();
+  saveSettings();
 }
 
 async function sendToBackground(type, extra = {}) {
@@ -231,6 +315,7 @@ async function createBidFromUrl() {
     const source = result.draftSource === "extension" ? "this panel's API key" : "the server";
     const notes = [];
     if (result.agreements) notes.push(`Agreements: ${result.agreements}`);
+    if (result.terms && result.terms !== "unchanged") notes.push(`Terms: ${result.terms}`);
     if (result.sealed && result.sealed !== "skipped") notes.push(`Sealed: ${result.sealed}`);
     if (!result.submitClicked) {
       notes.push(result.submitFound ? `Place Bid button found: ${result.submitTarget}` : "Place Bid button NOT found");
@@ -297,6 +382,18 @@ $("manualProjectUrl").addEventListener("keydown", (event) => {
   }
 });
 $("createBidFromUrlBtn").addEventListener("click", createBidFromUrl);
+$("addFixedRuleBtn").addEventListener("click", () => addBudgetRule("fixed"));
+$("addHourlyRuleBtn").addEventListener("click", () => addBudgetRule("hourly"));
+$("resetBudgetRulesBtn").addEventListener("click", () => {
+  budgetRules = BidBotBudget.DEFAULT_RULES.map((rule) => ({ ...rule }));
+  renderBudgetRules();
+  saveSettings();
+  setStatus("Budget ranges reset to the examples.", "ok");
+});
+
+chrome.runtime.onMessage.addListener((message) => {
+  if (message?.type === "BID_PROGRESS" && message.text) setStatus(message.text);
+});
 
 $("startAutoBtn").addEventListener("click", async () => {
   try {

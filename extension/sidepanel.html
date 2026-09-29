@@ -40,6 +40,18 @@
           <option value="3" selected>3 seconds</option>
           <option value="10">10 seconds</option>
         </select>
+        <h2>Budget rules</h2>
+        <p class="hint">The bot reads the project's listed budget and uses the matching row for Bid Amount and Days. Edit any value. Hourly projects only set the hourly rate.</p>
+        <p class="rules-legend">min ~ max → your bid</p>
+        <h3 class="rules-head">Fixed price</h3>
+        <div id="fixedRules" class="rules-list"></div>
+        <button id="addFixedRuleBtn" type="button" class="secondary">+ Add fixed range</button>
+        <h3 class="rules-head">Hourly</h3>
+        <div id="hourlyRules" class="rules-list"></div>
+        <button id="addHourlyRuleBtn" type="button" class="secondary">+ Add hourly range</button>
+        <div class="row">
+          <button id="resetBudgetRulesBtn" type="button" class="secondary">Reset example ranges</button>
+        </div>
       </section>
 
       <section>
@@ -121,6 +133,7 @@
       </details>
     </main>
 
+    <script src="budget.js"></script>
     <script src="ai.js"></script>
     <script src="sidepanel.app.js"></script>
   </body>

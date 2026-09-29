@@ -7,7 +7,7 @@ const store = require("./store");
 const auth = require("./auth");
 const dashboardHtml = require("./dashboard");
 const loginHtml = require("./login");
-const { generateBid, testConnection, listModels, DEFAULT_PROMPT, DEFAULT_MODELS, PLACEHOLDERS } = require("./ai");
+const { generateBid } = require("./ai");
 const { fetchProject } = require("./freelancer");
 
 const WORKER_TOKEN = process.env.WORKER_TOKEN || "";
@@ -52,7 +52,7 @@ async function expireStaleTasks(workerId) {
   }
 }
 
-async function prepareTask(task, settings) {
+async function prepareTask(task) {
   task.project = null;
   task.draft = null;
   task.note = null;
@@ -62,30 +62,9 @@ async function prepareTask(task, settings) {
   try {
     task.project = await fetchProject(task.url);
   } catch (error) {
-    task.note = `Project lookup failed (${error.message}); the worker will read the page and request the bid.`;
-    return task;
-  }
-
-  try {
-    task.draft = await generateBid(task.project, settings);
-  } catch (error) {
-    task.status = "failed";
-    task.result = { error: `Bid generation failed: ${error.message}` };
+    task.note = `Project lookup failed (${error.message}); the worker will read the page.`;
   }
   return task;
-}
-
-function publicSettings(settings) {
-  return {
-    provider: settings.provider || "",
-    model: settings.model || "",
-    baseUrl: settings.baseUrl || "",
-    prompt: settings.prompt || DEFAULT_PROMPT,
-    apiKeySet: Boolean(settings.apiKey),
-    apiKeyHint: settings.apiKey ? `…${settings.apiKey.slice(-4)}` : "",
-    defaultModels: DEFAULT_MODELS,
-    placeholders: PLACEHOLDERS
-  };
 }
 
 const STATIC_ICONS = {
@@ -167,22 +146,18 @@ app.post(
       return res.status(400).json({ error: `Not freelancer.com URLs: ${invalid.join(", ")}` });
     }
 
-    const settings = await store.getSettings();
     const tasks = await Promise.all(
       list.map(async (item) => {
-        const task = await prepareTask(
-          {
-            id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
-            workerId,
-            url: item,
-            type: "create_bid",
-            attempts: 0,
-            meta: meta || null,
-            createdAt: new Date().toISOString(),
-            claimedAt: null
-          },
-          settings
-        );
+        const task = await prepareTask({
+          id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+          workerId,
+          url: item,
+          type: "create_bid",
+          attempts: 0,
+          meta: meta || null,
+          createdAt: new Date().toISOString(),
+          claimedAt: null
+        });
         return store.createTask(task);
       })
     );
@@ -210,7 +185,7 @@ app.post(
       return res.status(409).json({ error: `Task is already ${task.status}` });
     }
     task.attempts = 0;
-    await prepareTask(task, await store.getSettings());
+    await prepareTask(task);
     if (task.status === "queued") {
       await store.requeueTask(task);
     } else {
@@ -264,78 +239,6 @@ app.post(
     }
     await store.finishTask(task, status, details);
     return res.json({ ok: true });
-  })
-);
-
-app.get(
-  "/api/settings",
-  asyncRoute(async (_req, res) => {
-    return res.json({ settings: publicSettings(await store.getSettings()) });
-  })
-);
-
-app.put(
-  "/api/settings",
-  asyncRoute(async (req, res) => {
-    const { provider, apiKey, model, baseUrl, prompt, clearApiKey } = req.body || {};
-    const current = await store.getSettings();
-    const next = {
-      ...current,
-      provider: String(provider ?? current.provider ?? "").trim(),
-      model: String(model ?? current.model ?? "").trim(),
-      baseUrl: String(baseUrl ?? current.baseUrl ?? "").trim(),
-      prompt: String(prompt ?? current.prompt ?? "").trim()
-    };
-    if (clearApiKey) {
-      next.apiKey = "";
-    } else if (apiKey && String(apiKey).trim()) {
-      next.apiKey = String(apiKey).trim();
-    }
-    await store.saveSettings(next);
-    return res.json({ ok: true, settings: publicSettings(next) });
-  })
-);
-
-async function candidateSettings(body = {}) {
-  const saved = await store.getSettings();
-  const { provider, apiKey, model, baseUrl } = body;
-  const candidate = {
-    provider: provider ?? saved.provider,
-    apiKey: apiKey && String(apiKey).trim(),
-    model: model ?? saved.model,
-    baseUrl: baseUrl ?? saved.baseUrl
-  };
-  if (!candidate.provider) {
-    throw new Error("No AI provider selected in Settings");
-  }
-  if (!candidate.apiKey) {
-    if (saved.apiKey && saved.provider !== candidate.provider) {
-      throw new Error(`The saved key belongs to ${saved.provider}. Enter a ${candidate.provider} API key.`);
-    }
-    candidate.apiKey = saved.apiKey;
-  }
-  return candidate;
-}
-
-app.post(
-  "/api/settings/test",
-  asyncRoute(async (req, res) => {
-    try {
-      return res.json({ ok: true, ...(await testConnection(await candidateSettings(req.body))) });
-    } catch (error) {
-      return res.json({ ok: false, error: error.message });
-    }
-  })
-);
-
-app.post(
-  "/api/settings/models",
-  asyncRoute(async (req, res) => {
-    try {
-      return res.json({ ok: true, models: await listModels(await candidateSettings(req.body)) });
-    } catch (error) {
-      return res.json({ ok: false, error: error.message });
-    }
   })
 );
 

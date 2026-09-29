@@ -1,4 +1,4 @@
-importScripts("freelancer.js", "ai.js");
+importScripts("freelancer.js", "ai.js", "budget.js");
 
 const ALARM_NAME = "bidbot-poll";
 const POLL_PERIOD_MINUTES = 0.5;
@@ -25,7 +25,8 @@ async function readSettings() {
     "aiApiKey",
     "aiModel",
     "aiBaseUrl",
-    "bidPrompt"
+    "bidPrompt",
+    "budgetRules"
   ]);
 }
 
@@ -106,9 +107,9 @@ async function navigateWorkerTab(url) {
   return tab;
 }
 
-async function sendToTab(tabId, message) {
+async function sendToTab(tabId, message, { attempts = 12, gapMs = 500 } = {}) {
   let lastError = null;
-  for (let attempt = 0; attempt < 5; attempt += 1) {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
     try {
       const response = await chrome.tabs.sendMessage(tabId, message);
       if (!response?.ok) {
@@ -120,13 +121,27 @@ async function sendToTab(tabId, message) {
       if (!String(error.message).includes("Receiving end does not exist")) {
         throw error;
       }
-      await wait(500);
+      if (attempt === 2 || attempt === 6) {
+        await injectContentScript(tabId);
+      }
+      await wait(gapMs);
     }
   }
   throw lastError;
 }
 
-async function fillBidInTab(tabId, settings, draft, { skipSign = false } = {}) {
+async function injectContentScript(tabId) {
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId, allFrames: true },
+      files: ["content.js"]
+    });
+  } catch (_error) {
+    // Tab may still be loading or a host we cannot inject into.
+  }
+}
+
+async function fillBidInTab(tabId, settings, draft, { skipSign = false, terms = {} } = {}) {
   const { ok, ...fill } = await sendToTab(tabId, {
     type: "FILL_BID",
     draft,
@@ -135,6 +150,8 @@ async function fillBidInTab(tabId, settings, draft, { skipSign = false } = {}) {
     signAgreements: skipSign ? false : settings.signAgreements !== false,
     signerName: settings.signerName || settings.workerName || "",
     signerAddress: settings.signerAddress || "",
+    bidAmount: (terms.bidAmount || "").trim(),
+    bidDeadlineDays: (terms.bidDeadlineDays || "").trim(),
     humanTyping: settings.humanTyping !== false,
     typingSpeed: settings.typingSpeed || "3"
   });
@@ -142,12 +159,228 @@ async function fillBidInTab(tabId, settings, draft, { skipSign = false } = {}) {
 }
 
 async function waitForPageAfterSign(tabId) {
-  await wait(1200);
+  await wait(1500);
   const tab = await chrome.tabs.get(tabId).catch(() => null);
   if (tab && tab.status === "loading") {
-    await waitForTabComplete(tabId, 8000).catch(() => {});
+    await waitForTabComplete(tabId, 12000).catch(() => {});
   }
-  await wait(600);
+  await wait(800);
+}
+
+async function inspectProjectPage(tabId, timeoutMs = 18000) {
+  const start = Date.now();
+  let last = { nda: false, bidReady: false, hasBidForm: false, kinds: [] };
+  while (Date.now() - start < timeoutMs) {
+    try {
+      last = await sendToTab(tabId, { type: "DETECT_NDA" });
+      if (last.nda || last.bidReady || last.hasBidForm) return last;
+    } catch (_error) {
+      // Content script may not be ready yet on a SPA navigation.
+    }
+    await wait(400);
+  }
+  return last;
+}
+
+async function waitForBidForm(tabId, timeoutMs = 20000) {
+  const start = Date.now();
+  let last = { nda: false, bidReady: false, hasBidForm: false, kinds: [] };
+  while (Date.now() - start < timeoutMs) {
+    try {
+      last = await sendToTab(tabId, { type: "DETECT_NDA" });
+      if (last.hasBidForm) return last;
+    } catch (_error) {
+      // Keep waiting for the bid form after NDA reload.
+    }
+    await wait(500);
+  }
+  return last;
+}
+
+function notifyBidProgress(text) {
+  chrome.runtime.sendMessage({ type: "BID_PROGRESS", text }).catch(() => {});
+}
+
+function isSignTabUrl(url) {
+  return /contracts\.freelancer\.com|hellosign|dropboxsign|\/nda|non[-\s]?disclosure|ip-agreement|ipagreement|embeddedsigning|contract-potential/i.test(
+    url || ""
+  );
+}
+
+async function waitForOpenedTab(beforeIds, timeoutMs = 15000) {
+  const start = Date.now();
+  let candidate = null;
+  while (Date.now() - start < timeoutMs) {
+    const tabs = await chrome.tabs.query({});
+    const opened = tabs.filter((tab) => !beforeIds.has(tab.id));
+    const ready = opened.find((tab) => {
+      const url = tab.url || tab.pendingUrl || "";
+      return isSignTabUrl(url) && !/^about:|chrome:/i.test(url);
+    });
+    if (ready) {
+      if (ready.status === "complete") return ready;
+      candidate = ready;
+    } else if (opened[0] && !/^about:|chrome:/i.test(opened[0].url || "")) {
+      candidate = opened[0];
+    }
+    await wait(300);
+  }
+  return candidate;
+}
+
+async function resolveAbsoluteHref(tabId, href) {
+  if (!href || href.startsWith("javascript:") || href === "#") return "";
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    return new URL(href, tab.url).href;
+  } catch (_error) {
+    return href;
+  }
+}
+
+async function fillAndCloseSignTab(signTabId, projectTabId, signerName, signerAddress, openedNew) {
+  await wait(500);
+  const tab = await chrome.tabs.get(signTabId).catch(() => null);
+  if (tab && tab.status === "loading") {
+    await waitForTabComplete(signTabId, 25000).catch(() => {});
+  }
+  await wait(800);
+  await injectContentScript(signTabId);
+  await wait(400);
+  const filled = await sendToTab(
+    signTabId,
+    {
+      type: "FILL_SIGNER_PAGE",
+      signerName,
+      signerAddress
+    },
+    { attempts: 16, gapMs: 400 }
+  );
+  await wait(800);
+  if (openedNew && signTabId !== projectTabId) {
+    await chrome.tabs.remove(signTabId).catch(() => {});
+    await chrome.tabs.update(projectTabId, { active: true }).catch(() => {});
+  }
+  return filled;
+}
+
+async function signAgreementsFromProjectTab(projectTabId, settings) {
+  const signerName = settings.signerName || settings.workerName || "";
+  const signerAddress = settings.signerAddress || "";
+  const projectTab = await chrome.tabs.get(projectTabId);
+  const projectUrl = projectTab.url;
+  const results = [];
+  const seen = new Set();
+
+  await chrome.storage.local.set({
+    pendingAgreementSign: { signerName, signerAddress, at: Date.now() },
+    agreementFrameResult: null
+  });
+
+  for (let round = 0; round < 4; round += 1) {
+    const listed = await sendToTab(projectTabId, { type: "LIST_AGREEMENTS" });
+    const next = (listed.agreements || []).find((item) => !seen.has(item.kind));
+    if (!next) break;
+    seen.add(next.kind);
+    notifyBidProgress(`Clicking ${next.text || next.kind} once...`);
+
+    const beforeIds = new Set((await chrome.tabs.query({})).map((tab) => tab.id));
+    const clicked = await sendToTab(projectTabId, { type: "CLICK_AGREEMENT", kind: next.kind });
+    let opened = await waitForOpenedTab(beforeIds, 15000);
+
+    if (!opened) {
+      const href = await resolveAbsoluteHref(projectTabId, clicked.href);
+      if (href && href !== projectUrl) {
+        notifyBidProgress("Opening the contract tab...");
+        opened = await chrome.tabs.create({ url: href, active: true });
+        await waitForTabComplete(opened.id, 25000).catch(() => {});
+        opened = await chrome.tabs.get(opened.id).catch(() => opened);
+      }
+    }
+
+    if (!opened) {
+      throw new Error("NDA opened, but the contracts.freelancer.com tab was not found. Leave that tab open and try again.");
+    }
+
+    notifyBidProgress(`Signing ${next.kind} on the contract tab (not the project page)...`);
+    const filled = await fillAndCloseSignTab(opened.id, projectTabId, signerName, signerAddress, true);
+    results.push(filled.agreements || next.kind);
+
+    await wait(800);
+    await chrome.tabs.update(projectTabId, { url: projectUrl, active: true }).catch(() => {});
+    await waitForTabComplete(projectTabId, 20000).catch(() => {});
+    await wait(1000);
+  }
+
+  await chrome.storage.local.set({ pendingAgreementSign: null });
+  return results.join("; ") || "none required";
+}
+
+async function createBidInTab(tabId, settings, serverDraft, url) {
+  const signerName = settings.signerName || settings.workerName || "";
+  const signerAddress = settings.signerAddress || "";
+  notifyBidProgress("Checking if this project requires an NDA/IP signature...");
+  let detect = await inspectProjectPage(tabId);
+  let agreements = "none required";
+  let signedNda = false;
+
+  if (detect.nda) {
+    notifyBidProgress("NDA/IP project — clicking each agreement once, then signing in the new tab.");
+    if (settings.signAgreements === false) {
+      throw new Error("This project requires an NDA/IP signature. Turn on auto-sign and fill Full legal name.");
+    }
+    if (!signerName.trim()) {
+      throw new Error("This is an NDA/IP project. Fill Full legal name in the side panel first.");
+    }
+    agreements = await signAgreementsFromProjectTab(tabId, settings);
+    signedNda = true;
+    detect = await waitForBidForm(tabId, 15000);
+    if (detect.nda && !detect.hasBidForm) {
+      throw new Error(`NDA/IP was not completed (${agreements}). Check the NDA tab for + Add Signature / Full Name / Address.`);
+    }
+  } else {
+    notifyBidProgress("Not an NDA project — reading the description and writing the bid.");
+  }
+
+  let project = null;
+  let projectSource = "";
+  let draft = serverDraft || "";
+  let draftSource = serverDraft ? "server" : "";
+
+  if (!serverDraft || signedNda) {
+    notifyBidProgress("Reading the project description...");
+    const read = await readProject(tabId, url, { preferPage: signedNda });
+    project = read.project;
+    projectSource = read.projectSource;
+    notifyBidProgress("Sending the description to the API key and generating the bid...");
+    const written = await writeDraft(settings, project);
+    draft = written.draft;
+    draftSource = written.draftSource;
+  }
+
+  if (!project) {
+    try {
+      const read = await readProject(tabId, url);
+      project = read.project;
+      projectSource = projectSource || read.projectSource;
+    } catch (_error) {
+      // Still try to bid; amount/days stay at Freelancer defaults if budget is unknown.
+    }
+  }
+
+  const terms = BidBotBudget.resolveBidTerms(settings.budgetRules, project);
+  if (terms.matched) {
+    notifyBidProgress(`Setting bid to ${terms.summary}...`);
+  } else {
+    notifyBidProgress(`Budget rule not applied (${terms.note}). Leaving Freelancer's amount/days.`);
+  }
+
+  notifyBidProgress("Typing the bid...");
+  const fill = await fillBidInTab(tabId, settings, draft, { skipSign: true, terms });
+  const termsNote = [terms.note, fill.terms && fill.terms !== "unchanged" ? fill.terms : ""]
+    .filter(Boolean)
+    .join("; ");
+  return { project, projectSource, draft, draftSource, ...fill, agreements, terms: termsNote };
 }
 
 async function readProject(tabId, url, { preferPage = false } = {}) {
@@ -177,46 +410,6 @@ async function writeDraft(settings, project) {
     return { draft, draftSource: "server" };
   }
   throw new Error("No AI API key saved in the side panel and no Server URL to ask instead.");
-}
-
-async function createBidInTab(tabId, settings, serverDraft, url) {
-  const signerName = settings.signerName || settings.workerName || "";
-  const signerAddress = settings.signerAddress || "";
-  const detect = await sendToTab(tabId, { type: "DETECT_NDA" });
-  let agreements = "none required";
-
-  if (detect.nda) {
-    if (settings.signAgreements === false) {
-      throw new Error("This project requires an NDA/IP signature. Turn on auto-sign and fill Full legal name.");
-    }
-    if (!signerName.trim()) {
-      throw new Error("This is an NDA/IP project. Fill Full legal name in the side panel first.");
-    }
-    const signed = await sendToTab(tabId, {
-      type: "SIGN_AGREEMENTS",
-      signerName,
-      signerAddress
-    });
-    agreements = signed.agreements || "signed";
-    await waitForPageAfterSign(tabId);
-  }
-
-  let project = null;
-  let projectSource = "";
-  let draft = serverDraft || "";
-  let draftSource = serverDraft ? "server" : "";
-
-  if (!serverDraft || detect.nda) {
-    const read = await readProject(tabId, url, { preferPage: Boolean(detect.nda) });
-    project = read.project;
-    projectSource = read.projectSource;
-    const written = await writeDraft(settings, project);
-    draft = written.draft;
-    draftSource = written.draftSource;
-  }
-
-  const fill = await fillBidInTab(tabId, settings, draft, { skipSign: true });
-  return { project, projectSource, draft, draftSource, ...fill, agreements };
 }
 
 async function reportTaskResult(settings, payload) {
@@ -258,6 +451,7 @@ async function processTask(settings, task) {
         sealed: result.sealed,
         agreements: result.agreements,
         draftSource: result.draftSource,
+        draft: result.draft || "",
         workerName: settings.workerName || ""
       }
     });
