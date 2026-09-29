@@ -95,9 +95,9 @@ module.exports = `<!doctype html>
   <script>
     const $ = (id) => document.getElementById(id);
     const ONLINE_WINDOW_MS = 90 * 1000;
+    const ROSTER_KEY = "bidbotRoster";
     const CACHE_KEY = "bidbotDashboardCache";
     let roster = [];
-    let pageLoaded = false;
 
     async function api(path, options = {}) {
       const response = await fetch(path, { ...options, headers: { "Content-Type": "application/json" } });
@@ -162,17 +162,53 @@ module.exports = `<!doctype html>
       }
     }
 
+    function loadLocalRoster() {
+      try {
+        const saved = JSON.parse(localStorage.getItem(ROSTER_KEY) || "[]");
+        return Array.isArray(saved) ? saved.filter((item) => item && item.workerId) : [];
+      } catch (_error) {
+        return [];
+      }
+    }
+
+    function saveLocalRoster(workers) {
+      const compact = (workers || []).map((item) => ({
+        workerId: String(item.workerId || "").trim(),
+        name: String(item.name || item.workerId || "").trim()
+      })).filter((item) => item.workerId);
+      localStorage.setItem(ROSTER_KEY, JSON.stringify(compact));
+      return compact;
+    }
+
+    function mergeWorkers(serverWorkers, localWorkers) {
+      const byId = new Map();
+      for (const item of localWorkers || []) {
+        if (!item?.workerId) continue;
+        byId.set(item.workerId, { workerId: item.workerId, name: item.name || item.workerId, lastSeen: null });
+      }
+      for (const item of serverWorkers || []) {
+        if (!item?.workerId) continue;
+        const prev = byId.get(item.workerId) || {};
+        byId.set(item.workerId, {
+          workerId: item.workerId,
+          name: item.name || prev.name || item.workerId,
+          lastSeen: item.lastSeen || prev.lastSeen || null
+        });
+      }
+      return [...byId.values()];
+    }
+
     function renderWorkers(workers) {
-      roster = workers;
+      roster = saveLocalRoster(workers);
       $("workersBody").replaceChildren();
       renderSendButtons();
-      if (!workers.length) {
+      if (!roster.length) {
         const row = document.createElement("tr");
         cell(row, "No workers yet. Add a name and Worker ID above.").colSpan = 4;
         $("workersBody").appendChild(row);
         return;
       }
-      for (const worker of workers) {
+      for (const worker of roster) {
         const online = worker.lastSeen && Date.now() - Date.parse(worker.lastSeen) < ONLINE_WINDOW_MS;
         const row = document.createElement("tr");
         const nameCell = cell(row, "");
@@ -309,17 +345,26 @@ module.exports = `<!doctype html>
       }
     }
 
-    function readCache() {
+    function migrateOldCache() {
+      if (loadLocalRoster().length) return;
       try {
-        return JSON.parse(localStorage.getItem(CACHE_KEY) || "null");
+        const cached = JSON.parse(localStorage.getItem(CACHE_KEY) || "null");
+        if (cached && cached.workers && cached.workers.length) saveLocalRoster(cached.workers);
       } catch (_error) {
-        return null;
+        // Ignore leftover cache that cannot be parsed.
       }
     }
 
     function writeCache(workers, tasks, results) {
+      const list = workers && workers.length ? workers : loadLocalRoster();
+      if (list.length) {
+        localStorage.setItem(ROSTER_KEY, JSON.stringify(list.map((item) => ({
+          workerId: item.workerId,
+          name: item.name || item.workerId
+        }))));
+      }
       localStorage.setItem(CACHE_KEY, JSON.stringify({
-        workers: (workers || []).map((item) => ({ workerId: item.workerId, name: item.name })),
+        workers: list.map((item) => ({ workerId: item.workerId, name: item.name || item.workerId })),
         queued: (tasks || [])
           .filter((task) => task.status === "queued" || task.status === "dispatched")
           .map((task) => ({ workerId: task.workerId, url: task.url })),
@@ -327,55 +372,42 @@ module.exports = `<!doctype html>
       }));
     }
 
-    async function restoreFromCacheIfEmpty(workers, tasks, results) {
-      if (workers.length || tasks.length || results.length) return { workers, tasks, results };
-      const cached = readCache();
-      if (!cached || (!(cached.workers || []).length && !(cached.queued || []).length)) {
-        return { workers, tasks, results };
+    async function syncRosterToServer(workers) {
+      for (const worker of workers) {
+        await api("/api/workers", {
+          method: "POST",
+          body: JSON.stringify({ name: worker.name, workerId: worker.workerId })
+        }).catch(() => {});
       }
-      for (const worker of cached.workers || []) {
-        await api("/api/workers", { method: "POST", body: JSON.stringify({ name: worker.name, workerId: worker.workerId }) });
-      }
-      const grouped = {};
-      for (const item of cached.queued || []) {
-        if (!item.workerId || !item.url) continue;
-        (grouped[item.workerId] || (grouped[item.workerId] = [])).push(item.url);
-      }
-      for (const [workerId, urls] of Object.entries(grouped)) {
-        await api("/api/tasks", { method: "POST", body: JSON.stringify({ workerId, urls }) });
-      }
-      const [nextWorkers, nextTasks, nextResults] = await Promise.all([
-        api("/api/workers"),
-        api("/api/tasks"),
-        api("/api/results")
-      ]);
-      return { workers: nextWorkers.workers, tasks: nextTasks.tasks, results: nextResults.results };
     }
 
     async function refresh() {
       try {
-        let [workersPayload, tasksPayload, resultsPayload] = await Promise.all([
+        const local = loadLocalRoster();
+        if (!roster.length && local.length) renderWorkers(local);
+
+        const [workersPayload, tasksPayload, resultsPayload] = await Promise.all([
           api("/api/workers"),
           api("/api/tasks"),
           api("/api/results")
         ]);
-        const restored = pageLoaded
-          ? { workers: workersPayload.workers, tasks: tasksPayload.tasks, results: resultsPayload.results }
-          : await restoreFromCacheIfEmpty(
-              workersPayload.workers,
-              tasksPayload.tasks,
-              resultsPayload.results
-            );
-        pageLoaded = true;
-        if (!restored.workers.length && !restored.tasks.length && roster.length) {
-          return;
+
+        let workers = mergeWorkers(workersPayload.workers, local);
+        if (!(workersPayload.workers || []).length && local.length) {
+          await syncRosterToServer(local);
+          const again = await api("/api/workers").catch(() => ({ workers: [] }));
+          workers = mergeWorkers(again.workers, local);
         }
-        renderWorkers(restored.workers);
-        renderStats(restored.tasks);
-        renderResults(restored.results);
-        renderTasks(restored.tasks);
-        writeCache(restored.workers, restored.tasks, restored.results);
+        if (!workers.length && local.length) workers = local;
+
+        renderWorkers(workers);
+        renderStats(tasksPayload.tasks);
+        renderResults(resultsPayload.results);
+        renderTasks(tasksPayload.tasks);
+        writeCache(workers, tasksPayload.tasks, resultsPayload.results);
       } catch (error) {
+        const local = loadLocalRoster();
+        if (local.length) renderWorkers(local);
         $("queueMessage").textContent = "Refresh failed: " + error.message;
       }
     }
@@ -408,13 +440,13 @@ module.exports = `<!doctype html>
     }
 
     async function removeWorker(worker) {
+      renderWorkers(loadLocalRoster().filter((item) => item.workerId !== worker.workerId));
+      $("rosterMessage").textContent = "Removed " + worker.name + ".";
       try {
-        const payload = await api("/api/workers/" + encodeURIComponent(worker.workerId), { method: "DELETE" });
-        renderWorkers(payload.workers);
-        $("rosterMessage").textContent = "Removed " + worker.name + ".";
+        await api("/api/workers/" + encodeURIComponent(worker.workerId), { method: "DELETE" });
         refresh();
       } catch (error) {
-        $("rosterMessage").textContent = "Could not remove worker: " + error.message;
+        $("rosterMessage").textContent = "Could not remove worker on the server: " + error.message;
       }
     }
 
@@ -426,15 +458,15 @@ module.exports = `<!doctype html>
         return;
       }
       $("addWorkerBtn").disabled = true;
+      renderWorkers(mergeWorkers([{ workerId, name: name || workerId }], loadLocalRoster()));
+      $("newWorkerName").value = "";
+      $("newWorkerId").value = "";
+      $("rosterMessage").textContent = "Added " + (name || workerId) + ". Use its Send button after you paste URLs.";
       try {
-        const payload = await api("/api/workers", { method: "POST", body: JSON.stringify({ name, workerId }) });
-        renderWorkers(payload.workers);
-        $("newWorkerName").value = "";
-        $("newWorkerId").value = "";
-        $("rosterMessage").textContent = "Added " + (name || workerId) + ". Use its Send button after you paste URLs.";
+        await api("/api/workers", { method: "POST", body: JSON.stringify({ name: name || workerId, workerId }) });
         refresh();
       } catch (error) {
-        $("rosterMessage").textContent = "Could not add worker: " + error.message;
+        $("rosterMessage").textContent = "Saved here, but the server did not keep it: " + error.message;
       } finally {
         $("addWorkerBtn").disabled = false;
       }
@@ -452,6 +484,8 @@ module.exports = `<!doctype html>
       location.replace("/login");
     });
 
+    migrateOldCache();
+    renderWorkers(loadLocalRoster());
     loadSession();
     refresh();
     setInterval(refresh, 10000);
