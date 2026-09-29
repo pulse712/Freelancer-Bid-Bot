@@ -179,6 +179,19 @@ module.exports = `<!doctype html>
       return [...byId.values()];
     }
 
+    // Browser roster is the source of truth. Server only supplies lastSeen.
+    // Never re-add a worker that the user already removed here.
+    function enrichLocalWorkers(localWorkers, serverWorkers) {
+      const seen = Object.fromEntries((serverWorkers || []).map((item) => [item.workerId, item]));
+      return (localWorkers || [])
+        .filter((item) => item && item.workerId)
+        .map((item) => ({
+          workerId: item.workerId,
+          name: item.name || item.workerId,
+          lastSeen: seen[item.workerId]?.lastSeen || null
+        }));
+    }
+
     function renderWorkers(workers) {
       roster = saveLocalRoster(workers);
       $("workersBody").replaceChildren();
@@ -266,13 +279,8 @@ module.exports = `<!doctype html>
     }
 
     function writeCache(workers, tasks, results) {
-      const list = workers && workers.length ? workers : loadLocalRoster();
-      if (list.length) {
-        localStorage.setItem(ROSTER_KEY, JSON.stringify(list.map((item) => ({
-          workerId: item.workerId,
-          name: item.name || item.workerId
-        }))));
-      }
+      const list = Array.isArray(workers) ? workers : loadLocalRoster();
+      saveLocalRoster(list);
       localStorage.setItem(CACHE_KEY, JSON.stringify({
         workers: list.map((item) => ({ workerId: item.workerId, name: item.name || item.workerId })),
         queued: (tasks || [])
@@ -282,12 +290,31 @@ module.exports = `<!doctype html>
       }));
     }
 
-    async function syncRosterToServer(workers) {
-      for (const worker of workers) {
-        await api("/api/workers", {
-          method: "POST",
-          body: JSON.stringify({ name: worker.name, workerId: worker.workerId })
-        }).catch(() => {});
+    async function syncRosterToServer(workers, serverWorkers = null) {
+      const local = Array.isArray(workers) ? workers : loadLocalRoster();
+      let server = serverWorkers;
+      if (!server) {
+        try {
+          server = (await api("/api/workers")).workers || [];
+        } catch (_error) {
+          server = [];
+        }
+      }
+      const localIds = new Set(local.map((item) => item.workerId));
+      const serverById = Object.fromEntries((server || []).map((item) => [item.workerId, item]));
+      for (const worker of server || []) {
+        if (!localIds.has(worker.workerId)) {
+          await api("/api/workers/" + encodeURIComponent(worker.workerId), { method: "DELETE" }).catch(() => {});
+        }
+      }
+      for (const worker of local) {
+        const existing = serverById[worker.workerId];
+        if (!existing || existing.name !== worker.name) {
+          await api("/api/workers", {
+            method: "POST",
+            body: JSON.stringify({ name: worker.name, workerId: worker.workerId })
+          }).catch(() => {});
+        }
       }
     }
 
@@ -302,13 +329,8 @@ module.exports = `<!doctype html>
           api("/api/results")
         ]);
 
-        let workers = mergeWorkers(workersPayload.workers, local);
-        if (!(workersPayload.workers || []).length && local.length) {
-          await syncRosterToServer(local);
-          const again = await api("/api/workers").catch(() => ({ workers: [] }));
-          workers = mergeWorkers(again.workers, local);
-        }
-        if (!workers.length && local.length) workers = local;
+        const workers = enrichLocalWorkers(local, workersPayload.workers);
+        await syncRosterToServer(workers, workersPayload.workers);
 
         renderWorkers(workers);
         renderResults(resultsPayload.results);
@@ -348,13 +370,15 @@ module.exports = `<!doctype html>
     }
 
     async function removeWorker(worker) {
-      renderWorkers(loadLocalRoster().filter((item) => item.workerId !== worker.workerId));
+      const next = loadLocalRoster().filter((item) => item.workerId !== worker.workerId);
+      renderWorkers(next);
       $("rosterMessage").textContent = "Removed " + worker.name + ".";
       try {
         await api("/api/workers/" + encodeURIComponent(worker.workerId), { method: "DELETE" });
+        await syncRosterToServer(next);
         refresh();
       } catch (error) {
-        $("rosterMessage").textContent = "Could not remove worker on the server: " + error.message;
+        $("rosterMessage").textContent = "Removed here. Server sync failed: " + error.message;
       }
     }
 
