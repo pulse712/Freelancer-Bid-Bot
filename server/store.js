@@ -1,6 +1,16 @@
+const fs = require("fs");
+const path = require("path");
+require("dotenv").config();
+
 const REDIS_URL = process.env.UPSTASH_REDIS_REST_URL || process.env.KV_REST_API_URL || "";
 const REDIS_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN || process.env.KV_REST_API_TOKEN || "";
 const MAX_RECENT = 500;
+
+function snapshotPath() {
+  if (process.env.BIDBOT_DATA_FILE) return process.env.BIDBOT_DATA_FILE;
+  if (process.env.VERCEL) return path.join("/tmp", "bidbot-store.json");
+  return path.join(__dirname, "..", ".data", "store.json");
+}
 
 function createRedisClient() {
   return async function cmd(...args) {
@@ -20,30 +30,60 @@ function createRedisClient() {
   };
 }
 
-function createMemoryClient() {
-  const data = new Map();
-  const list = (key) => {
-    if (!data.has(key)) data.set(key, []);
-    return data.get(key);
-  };
-  const set = (key) => {
-    if (!data.has(key)) data.set(key, new Set());
-    return data.get(key);
-  };
-  const hash = (key) => {
-    if (!data.has(key)) data.set(key, new Map());
-    return data.get(key);
-  };
-  const range = (items, start, stop) => {
+function emptyState() {
+  return { kv: {}, lists: {}, sets: {}, hashes: {} };
+}
+
+function loadFileState() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(snapshotPath(), "utf8"));
+    return {
+      kv: parsed.kv || {},
+      lists: parsed.lists || {},
+      sets: parsed.sets || {},
+      hashes: parsed.hashes || {}
+    };
+  } catch (_error) {
+    return emptyState();
+  }
+}
+
+function createFileClient() {
+  const state = loadFileState();
+
+  function persist() {
+    const file = snapshotPath();
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify(state));
+  }
+
+  function list(key) {
+    if (!Array.isArray(state.lists[key])) state.lists[key] = [];
+    return state.lists[key];
+  }
+
+  function setOf(key) {
+    if (!Array.isArray(state.sets[key])) state.sets[key] = [];
+    return state.sets[key];
+  }
+
+  function hash(key) {
+    if (!state.hashes[key] || typeof state.hashes[key] !== "object") state.hashes[key] = {};
+    return state.hashes[key];
+  }
+
+  function range(items, start, stop) {
     const end = Number(stop) < 0 ? items.length + Number(stop) + 1 : Number(stop) + 1;
     return items.slice(Number(start), end);
-  };
+  }
+
+  const mutating = new Set(["SET", "RPUSH", "LPUSH", "LPOP", "LTRIM", "SADD", "SREM", "HSET"]);
 
   const commands = {
-    GET: (key) => data.get(key) ?? null,
-    MGET: (...keys) => keys.map((key) => data.get(key) ?? null),
+    GET: (key) => state.kv[key] ?? null,
+    MGET: (...keys) => keys.map((key) => state.kv[key] ?? null),
     SET: (key, value) => {
-      data.set(key, value);
+      state.kv[key] = value;
       return "OK";
     },
     RPUSH: (key, value) => list(key).push(value),
@@ -51,30 +91,40 @@ function createMemoryClient() {
     LPOP: (key) => list(key).shift() ?? null,
     LRANGE: (key, start, stop) => range(list(key), start, stop),
     LTRIM: (key, start, stop) => {
-      data.set(key, range(list(key), start, stop));
+      state.lists[key] = range(list(key), start, stop);
       return "OK";
     },
     SADD: (key, member) => {
-      set(key).add(member);
+      const items = setOf(key);
+      if (items.includes(member)) return 0;
+      items.push(member);
       return 1;
     },
-    SREM: (key, member) => (set(key).delete(member) ? 1 : 0),
-    SMEMBERS: (key) => [...set(key)],
+    SREM: (key, member) => {
+      const items = setOf(key);
+      const next = items.filter((item) => item !== member);
+      const removed = next.length !== items.length;
+      state.sets[key] = next;
+      return removed ? 1 : 0;
+    },
+    SMEMBERS: (key) => [...setOf(key)],
     HSET: (key, field, value) => {
-      hash(key).set(field, value);
+      hash(key)[field] = value;
       return 1;
     },
-    HGETALL: (key) => [...hash(key)].flat()
+    HGETALL: (key) => Object.entries(hash(key)).flat()
   };
 
   return async function cmd(name, ...args) {
-    return commands[name](...args.map(String));
+    const result = commands[name](...args.map(String));
+    if (mutating.has(name)) persist();
+    return result;
   };
 }
 
 const useRedis = Boolean(REDIS_URL && REDIS_TOKEN);
-const cmd = useRedis ? createRedisClient() : createMemoryClient();
-const storageKind = useRedis ? "redis" : "memory";
+const cmd = useRedis ? createRedisClient() : createFileClient();
+const storageKind = useRedis ? "redis" : "file";
 
 async function saveTask(task) {
   await cmd("SET", `task:${task.id}`, JSON.stringify(task));

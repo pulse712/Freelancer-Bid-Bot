@@ -123,7 +123,7 @@ app.post("/api/logout", (req, res) => {
 });
 
 app.get("/api/session", (req, res) => {
-  res.json({ passwordEnabled: auth.passwordEnabled, loggedIn: auth.isLoggedIn(req) });
+    res.json({ passwordEnabled: auth.passwordEnabled, loggedIn: auth.isLoggedIn(req), storage: store.storageKind });
 });
 
 // Everything below needs a dashboard login, except worker routes (guarded by the worker token).

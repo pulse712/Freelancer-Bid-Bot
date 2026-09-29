@@ -95,7 +95,9 @@ module.exports = `<!doctype html>
   <script>
     const $ = (id) => document.getElementById(id);
     const ONLINE_WINDOW_MS = 90 * 1000;
+    const CACHE_KEY = "bidbotDashboardCache";
     let roster = [];
+    let pageLoaded = false;
 
     async function api(path, options = {}) {
       const response = await fetch(path, { ...options, headers: { "Content-Type": "application/json" } });
@@ -307,17 +309,72 @@ module.exports = `<!doctype html>
       }
     }
 
+    function readCache() {
+      try {
+        return JSON.parse(localStorage.getItem(CACHE_KEY) || "null");
+      } catch (_error) {
+        return null;
+      }
+    }
+
+    function writeCache(workers, tasks, results) {
+      localStorage.setItem(CACHE_KEY, JSON.stringify({
+        workers: (workers || []).map((item) => ({ workerId: item.workerId, name: item.name })),
+        queued: (tasks || [])
+          .filter((task) => task.status === "queued" || task.status === "dispatched")
+          .map((task) => ({ workerId: task.workerId, url: task.url })),
+        at: Date.now()
+      }));
+    }
+
+    async function restoreFromCacheIfEmpty(workers, tasks, results) {
+      if (workers.length || tasks.length || results.length) return { workers, tasks, results };
+      const cached = readCache();
+      if (!cached || (!(cached.workers || []).length && !(cached.queued || []).length)) {
+        return { workers, tasks, results };
+      }
+      for (const worker of cached.workers || []) {
+        await api("/api/workers", { method: "POST", body: JSON.stringify({ name: worker.name, workerId: worker.workerId }) });
+      }
+      const grouped = {};
+      for (const item of cached.queued || []) {
+        if (!item.workerId || !item.url) continue;
+        (grouped[item.workerId] || (grouped[item.workerId] = [])).push(item.url);
+      }
+      for (const [workerId, urls] of Object.entries(grouped)) {
+        await api("/api/tasks", { method: "POST", body: JSON.stringify({ workerId, urls }) });
+      }
+      const [nextWorkers, nextTasks, nextResults] = await Promise.all([
+        api("/api/workers"),
+        api("/api/tasks"),
+        api("/api/results")
+      ]);
+      return { workers: nextWorkers.workers, tasks: nextTasks.tasks, results: nextResults.results };
+    }
+
     async function refresh() {
       try {
-        const [workers, tasks, results] = await Promise.all([
+        let [workersPayload, tasksPayload, resultsPayload] = await Promise.all([
           api("/api/workers"),
           api("/api/tasks"),
           api("/api/results")
         ]);
-        renderWorkers(workers.workers);
-        renderStats(tasks.tasks);
-        renderResults(results.results);
-        renderTasks(tasks.tasks);
+        const restored = pageLoaded
+          ? { workers: workersPayload.workers, tasks: tasksPayload.tasks, results: resultsPayload.results }
+          : await restoreFromCacheIfEmpty(
+              workersPayload.workers,
+              tasksPayload.tasks,
+              resultsPayload.results
+            );
+        pageLoaded = true;
+        if (!restored.workers.length && !restored.tasks.length && roster.length) {
+          return;
+        }
+        renderWorkers(restored.workers);
+        renderStats(restored.tasks);
+        renderResults(restored.results);
+        renderTasks(restored.tasks);
+        writeCache(restored.workers, restored.tasks, restored.results);
       } catch (error) {
         $("queueMessage").textContent = "Refresh failed: " + error.message;
       }
@@ -355,6 +412,7 @@ module.exports = `<!doctype html>
         const payload = await api("/api/workers/" + encodeURIComponent(worker.workerId), { method: "DELETE" });
         renderWorkers(payload.workers);
         $("rosterMessage").textContent = "Removed " + worker.name + ".";
+        refresh();
       } catch (error) {
         $("rosterMessage").textContent = "Could not remove worker: " + error.message;
       }
@@ -374,6 +432,7 @@ module.exports = `<!doctype html>
         $("newWorkerName").value = "";
         $("newWorkerId").value = "";
         $("rosterMessage").textContent = "Added " + (name || workerId) + ". Use its Send button after you paste URLs.";
+        refresh();
       } catch (error) {
         $("rosterMessage").textContent = "Could not add worker: " + error.message;
       } finally {
