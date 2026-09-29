@@ -1,8 +1,8 @@
 const $ = (id) => document.getElementById(id);
 
 const statusEl = $("status");
-const AUTO_ON_TEXT = "Auto mode is on. Checking the server for tasks every 30 seconds.";
-const AUTO_OFF_TEXT = "Auto mode is off.";
+const AUTO_ON_TEXT = "Auto is on. Checking the dashboard every few seconds for URLs sent to this Worker ID.";
+const AUTO_OFF_TEXT = "Auto is off. Dashboard URLs will wait until you start Auto.";
 
 const TEXT_FIELDS = {
   workerName: "workerName",
@@ -22,6 +22,7 @@ const CHECKBOXES = { autoSubmit: "autoSubmit", sealedBid: "sealedBid", humanTypi
 let loadedModels = [];
 let modelsRequestId = 0;
 let budgetRules = BidBotBudget.DEFAULT_RULES.map((rule) => ({ ...rule }));
+let pollTimer = null;
 
 function setStatus(text, kind = "") {
   statusEl.textContent = text;
@@ -160,6 +161,10 @@ async function loadSettings() {
   updateNameBadge();
   renderModelOptions(stored.aiModel || "");
   if ($("aiProvider").value && $("aiApiKey").value) loadModels();
+  if (stored.automationEnabled) {
+    startLocalPoll();
+    sendToBackground("AUTOMATION_TICK").catch(() => {});
+  }
 }
 
 async function saveSettings() {
@@ -253,6 +258,31 @@ function addBudgetRule(type) {
   ];
   renderBudgetRules();
   saveSettings();
+}
+
+function serverReady() {
+  return Boolean($("apiBaseUrl").value.trim() && $("workerId").value.trim());
+}
+
+function startLocalPoll() {
+  if (pollTimer) return;
+  pollTimer = setInterval(() => {
+    sendToBackground("AUTOMATION_TICK").catch(() => {});
+  }, 3000);
+}
+
+function stopLocalPoll() {
+  if (!pollTimer) return;
+  clearInterval(pollTimer);
+  pollTimer = null;
+}
+
+async function startAutomation() {
+  await saveSettings();
+  if (!serverReady()) throw new Error("Set the Server URL and Worker ID first.");
+  await sendToBackground("AUTOMATION_START");
+  startLocalPoll();
+  $("autoStatus").textContent = AUTO_ON_TEXT;
 }
 
 async function sendToBackground(type, extra = {}) {
@@ -397,12 +427,8 @@ chrome.runtime.onMessage.addListener((message) => {
 
 $("startAutoBtn").addEventListener("click", async () => {
   try {
-    await saveSettings();
-    if (!$("apiBaseUrl").value.trim()) throw new Error("Set the Server URL first.");
-    if (!$("workerId").value.trim()) throw new Error("Set a Worker ID first.");
-    await sendToBackground("AUTOMATION_START");
-    $("autoStatus").textContent = AUTO_ON_TEXT;
-    setStatus("Automation started.", "ok");
+    await startAutomation();
+    setStatus("Auto is on. Dashboard URLs for this Worker ID will be bid on automatically.", "ok");
   } catch (error) {
     setStatus(`Could not start automation: ${error.message}`, "error");
   }
@@ -410,9 +436,10 @@ $("startAutoBtn").addEventListener("click", async () => {
 
 $("stopAutoBtn").addEventListener("click", async () => {
   try {
+    stopLocalPoll();
     await sendToBackground("AUTOMATION_STOP");
     $("autoStatus").textContent = AUTO_OFF_TEXT;
-    setStatus("Automation stopped.", "ok");
+    setStatus("Auto stopped. Dashboard URLs will wait.", "ok");
   } catch (error) {
     setStatus(`Could not stop automation: ${error.message}`, "error");
   }
@@ -421,9 +448,9 @@ $("stopAutoBtn").addEventListener("click", async () => {
 $("runNowBtn").addEventListener("click", async () => {
   try {
     await saveSettings();
-    setStatus("Checking server for tasks...");
+    setStatus("Checking the dashboard for URLs...");
     await sendToBackground("AUTOMATION_RUN_NOW");
-    setStatus("Check finished. Results are on the server dashboard.", "ok");
+    setStatus("Check finished. Results are on the dashboard.", "ok");
   } catch (error) {
     setStatus(`Run failed: ${error.message}`, "error");
   }

@@ -58,13 +58,24 @@ async function prepareTask(task) {
   task.note = null;
   task.result = null;
   task.status = "queued";
+  task.claimedAt = null;
+  return task;
+}
 
+async function enrichTaskProject(taskId) {
+  const task = await store.getTask(taskId);
+  if (!task || task.status === "done" || task.status === "failed") return;
   try {
     task.project = await fetchProject(task.url);
+    task.note = null;
   } catch (error) {
     task.note = `Project lookup failed (${error.message}); the worker will read the page.`;
   }
-  return task;
+  const latest = await store.getTask(taskId);
+  if (!latest || latest.status === "done" || latest.status === "failed") return;
+  latest.project = task.project;
+  latest.note = task.note;
+  await store.saveTask(latest);
 }
 
 const STATIC_ICONS = {
@@ -146,9 +157,10 @@ app.post(
       return res.status(400).json({ error: `Not freelancer.com URLs: ${invalid.join(", ")}` });
     }
 
-    const tasks = await Promise.all(
-      list.map(async (item) => {
-        const task = await prepareTask({
+    const tasks = [];
+    for (const item of list) {
+      const task = await store.createTask(
+        await prepareTask({
           id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
           workerId,
           url: item,
@@ -157,10 +169,11 @@ app.post(
           meta: meta || null,
           createdAt: new Date().toISOString(),
           claimedAt: null
-        });
-        return store.createTask(task);
-      })
-    );
+        })
+      );
+      tasks.push(task);
+      enrichTaskProject(task.id).catch((error) => console.error("Project lookup failed:", error));
+    }
     return res.json({ ok: true, tasks });
   })
 );
@@ -186,11 +199,8 @@ app.post(
     }
     task.attempts = 0;
     await prepareTask(task);
-    if (task.status === "queued") {
-      await store.requeueTask(task);
-    } else {
-      await store.saveTask(task);
-    }
+    await store.requeueTask(task);
+    enrichTaskProject(task.id).catch((error) => console.error("Project lookup failed:", error));
     return res.json({ ok: true, task });
   })
 );

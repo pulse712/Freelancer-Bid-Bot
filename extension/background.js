@@ -435,8 +435,9 @@ async function processTask(settings, task) {
   }
 
   try {
+    notifyBidProgress(`Dashboard sent a project for ${settings.workerId}. Opening and bidding...`);
     const tab = await navigateWorkerTab(task.url);
-    const result = await createBidInTab(tab.id, settings, task.draft, task.url);
+    const result = await createBidInTab(tab.id, settings, null, task.url);
     await chrome.storage.local.set({ lastDraft: result.draft, lastDraftAt: new Date().toISOString() });
     await reportTaskResult(settings, {
       ...base,
@@ -488,6 +489,9 @@ async function processAutomationTick({ force = false } = {}) {
       }
       await processTask(settings, task);
     }
+  } catch (error) {
+    notifyBidProgress(`Dashboard check failed: ${error.message}`);
+    throw error;
   } finally {
     tickInProgress = false;
   }
@@ -496,6 +500,7 @@ async function processAutomationTick({ force = false } = {}) {
 async function enableAutomation() {
   await chrome.storage.local.set({ automationEnabled: true });
   await chrome.alarms.create(ALARM_NAME, { periodInMinutes: POLL_PERIOD_MINUTES });
+  await processAutomationTick();
 }
 
 async function disableAutomation() {
@@ -567,6 +572,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
   if (message?.type === "AUTOMATION_STOP") {
     return respondWith(disableAutomation(), sendResponse);
+  }
+  if (message?.type === "AUTOMATION_TICK") {
+    return respondWith(processAutomationTick({ force: false }), sendResponse);
   }
   if (message?.type === "AUTOMATION_RUN_NOW") {
     return respondWith(processAutomationTick({ force: true }), sendResponse);

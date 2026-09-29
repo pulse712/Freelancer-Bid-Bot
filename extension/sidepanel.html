@@ -113,13 +113,8 @@
       </section>
 
       <section>
-        <h2>Last bid</h2>
-        <textarea id="draftOutput" rows="8" readonly placeholder="The last bid this worker typed appears here."></textarea>
-      </section>
-
-      <details class="server">
-        <summary>Server mode (optional)</summary>
-        <p class="hint">Connect to the Bid Bot dashboard to receive queued projects. Leave empty to use this panel alone.</p>
+        <h2>Dashboard</h2>
+        <p class="hint">When the dashboard sends project URLs to this Worker ID, this panel opens each one and bids automatically. Keep Auto on while you work.</p>
         <label for="apiBaseUrl">Server URL</label>
         <input id="apiBaseUrl" type="text" placeholder="https://your-app.vercel.app" />
         <label for="workerToken">Worker token</label>
@@ -127,10 +122,15 @@
         <div class="row">
           <button id="startAutoBtn" type="button">Start Auto</button>
           <button id="stopAutoBtn" type="button" class="secondary">Stop Auto</button>
-          <button id="runNowBtn" type="button" class="secondary">Run Now</button>
+          <button id="runNowBtn" type="button" class="secondary">Check now</button>
         </div>
-        <p id="autoStatus" class="hint">Auto mode is off.</p>
-      </details>
+        <p id="autoStatus" class="hint">Auto is off. Dashboard URLs will wait until you start Auto.</p>
+      </section>
+
+      <section>
+        <h2>Last bid</h2>
+        <textarea id="draftOutput" rows="8" readonly placeholder="The last bid this worker typed appears here."></textarea>
+      </section>
     </main>
 
     <script src="budget.js"></script>

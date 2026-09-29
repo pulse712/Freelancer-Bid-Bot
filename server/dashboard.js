@@ -42,15 +42,16 @@ module.exports = `<!doctype html>
   </header>
 
   <div class="stats" id="stats"></div>
-  <div class="hint">Counts cover the last 100 tasks. Refreshes every 10 seconds. Bids are written by each worker's extension, not this dashboard.</div>
+  <div class="hint">Counts cover the last 100 tasks. Refreshes every 10 seconds.</div>
 
-  <h2>Queue projects</h2>
+  <h2>Send projects to a worker</h2>
+  <p class="hint">Pick the Worker ID of an extension that has Auto on. Each URL is sent to that worker; the extension opens it and bids.</p>
   <label for="workerId">Worker ID</label>
   <input id="workerId" list="workerList" placeholder="acc-1" />
   <datalist id="workerList"></datalist>
   <label for="urls">Freelancer project URLs (one per line)</label>
   <textarea id="urls" rows="4" placeholder="https://www.freelancer.com/projects/..."></textarea>
-  <button id="queueBtn" type="button">Queue projects</button>
+  <button id="queueBtn" type="button">Send to worker</button>
   <p class="message" id="queueMessage"></p>
 
   <h2>Working results</h2>
@@ -261,13 +262,13 @@ module.exports = `<!doctype html>
       const urls = $("urls").value.split("\\n").map((line) => line.trim()).filter(Boolean);
       localStorage.setItem("bidbotWorkerId", workerId);
       $("queueBtn").disabled = true;
-      $("queueMessage").textContent = "Queuing projects...";
+      $("queueMessage").textContent = "Sending URLs to worker " + workerId + "...";
       try {
         const { tasks } = await api("/api/tasks", { method: "POST", body: JSON.stringify({ workerId, urls }) });
         const failed = tasks.filter((task) => task.status === "failed").length;
         $("queueMessage").textContent =
-          "Queued " + (tasks.length - failed) + " of " + tasks.length + " task(s)." +
-          (failed ? " " + failed + " failed - see Result column." : "");
+          "Sent " + (tasks.length - failed) + " of " + tasks.length + " URL(s) to " + workerId + "." +
+          (failed ? " " + failed + " failed - see Result column." : " The extension will bid when Auto is on.");
         $("urls").value = "";
         refresh();
       } catch (error) {
